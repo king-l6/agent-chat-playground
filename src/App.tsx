@@ -61,7 +61,6 @@ export default function App() {
 
   /** 把单个 SSE 事件反映到 UI（核心状态机） */
   function handleEvent(assistantId: string, event: SseEvent) {
-    // console.log('handleEvent', assistantId, event);
     if (event.type === 'meta') {
       setMode(event.mode);
       if (event.model) setModel(event.model);
@@ -79,7 +78,6 @@ export default function App() {
     if (event.type === 'tool_start') {
       // 插入/替换一张 running 卡片（同 id 先滤掉再加，避免重复）
       patchAssistant(assistantId, (m) => {
-        // console.log('tool_start', m);
         return {
           ...m,
           tools: [
@@ -98,7 +96,6 @@ export default function App() {
     if (event.type === 'tool_result') {
       // 对应卡片改为完成，写入 result
       patchAssistant(assistantId, (m) => {
-        // console.log('tool_result', m);
         return {
           ...m,
           tools: m.tools.map((t) =>
@@ -112,7 +109,6 @@ export default function App() {
     }
     if (event.type === 'tool_error') {
       patchAssistant(assistantId, (m) => {
-        // console.log('tool_error', m);
         return {
           ...m,
           tools: m.tools.map((t) =>
@@ -163,10 +159,6 @@ export default function App() {
     };
 
     const next = [...messages, userMsg, assistantMsg];
-    console.log('next', next);
-    console.log('messages', messages);
-    console.log('userMsg', userMsg);
-    console.log('assistantMsg', assistantMsg);
     setMessages(next);
     setBusy(true);
 

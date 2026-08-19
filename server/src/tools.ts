@@ -4,6 +4,8 @@
  * - executeTool：服务端真正跑工具，返回 JSON 字符串
  */
 import type { ChatCompletionTool } from 'openai/resources/chat/completions'
+// 引用 RAG：检索逻辑在 knowledge.ts，这里只负责「工具入口 + 格式化 JSON 返回」
+import { searchChunks } from './knowledge.js'
 
 /** 交给大模型的工具清单（function calling schema） */
 export const toolDefinitions: ChatCompletionTool[] = [
@@ -11,7 +13,8 @@ export const toolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'get_current_time',
-      description: '获取当前日期与时间（上海时区）。当用户询问现在几点、今天日期时调用。',
+      description:
+        '获取当前日期与时间（上海时区）。当用户询问现在几点、今天日期时调用。',
       parameters: {
         type: 'object',
         properties: {},
@@ -42,7 +45,7 @@ export const toolDefinitions: ChatCompletionTool[] = [
     function: {
       name: 'search_notes',
       description:
-        '在本地演示知识库中检索笔记片段（模拟 RAG）。当用户问项目、简历、Agent、SSE 等相关问题时调用。',
+        '在本地知识库中检索文档片段（含项目说明与求职补充手册）。当用户问项目、SSE、tool calling、技术栈、简历缺口、怎么学、求职规划等问题时调用。',
       parameters: {
         type: 'object',
         properties: {
@@ -56,69 +59,73 @@ export const toolDefinitions: ChatCompletionTool[] = [
       },
     },
   },
-]
-
-/** 演示用「知识库」几条笔记（真 RAG 会换成切分后的文档块） */
-const DEMO_NOTES: Array<{ id: string; title: string; text: string }> = [
   {
-    id: '1',
-    title: '项目目标',
-    text: 'agent-chat-playground 是一个可演示的 AI Agent 前端作品：流式 Chat（SSE）+ tool calling 卡片 + 简易检索。',
+    type: 'function',
+    function: {
+      name: 'roll_dice',
+      description: '掷骰子。用户说掷骰子、随机点数、roll dice 时调用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          sides: {
+            type: 'number',
+            description: '骰子面数，默认 6',
+          },
+          count: {
+            type: 'number',
+            description: '掷几次，默认 1，最多 10',
+          },
+        },
+        additionalProperties: false,
+      },
+    },
   },
-  {
-    id: '2',
-    title: '技术栈',
-    text: '前端 React + TypeScript + Vite；后端 Express + OpenAI 兼容 API；支持 DeepSeek / OpenAI。无 Key 时可走 mock 模式。',
-  },
-  {
-    id: '3',
-    title: 'SSE',
-    text: '服务端用 text/event-stream 推送 text_delta、tool_start、tool_result 等事件；前端 ReadableStream 边收边渲染。',
-  },
-  {
-    id: '4',
-    title: 'Tool calling',
-    text: '模型返回 tool_calls 后，服务端执行本地工具，把结果写回 messages，再继续向模型要最终回答，UI 用卡片展示调用过程。',
-  },
-]
+];
 
 /**
  * 安全一点的四则运算：先白名单校验字符，再用 Function 求值
  * （演示用；生产应换更严的表达式解析器）
  */
 function safeCalculate(expression: string): string {
-  const normalized = expression.replace(/\s+/g, '')
+  const normalized = expression.replace(/\s+/g, '');
   if (!/^[\d+\-*/().]+$/.test(normalized)) {
-    throw new Error('表达式含有非法字符，仅允许数字和 + - * / ( )')
+    throw new Error('表达式含有非法字符，仅允许数字和 + - * / ( )');
   }
   // eslint-disable-next-line no-new-func
-  const value = Function(`"use strict"; return (${normalized})`)()
+  const value = Function(`"use strict"; return (${normalized})`)();
   if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new Error('计算结果无效')
+    throw new Error('计算结果无效');
   }
-  return String(value)
+  return String(value);
 }
 
 /**
- * 关键词命中 DEMO_NOTES，最多返回 3 条
- * 返回值是 JSON 字符串，方便模型阅读并引用
+ * search_notes 工具的真正实现
+ * 流程：query → searchChunks(Top3，本轮 citation=1..K) → JSON 给模型 / 前端卡片
  */
 function searchNotes(query: string): string {
-  const q = query.toLowerCase()
-  const hits = DEMO_NOTES.filter(
-    (note) =>
-      note.title.toLowerCase().includes(q) ||
-      note.text.toLowerCase().includes(q) ||
-      q.split(/\s+/).some((token) => token && note.text.toLowerCase().includes(token)),
-  ).slice(0, 3)
+  // 从 knowledge 模块拿最相关的 3 个 chunk（已带本轮局部 citation）
+  const hits = searchChunks(query, 3)
 
+  // 没命中：告诉模型别瞎编，换关键词
   if (hits.length === 0) {
-    return JSON.stringify({ hits: [], message: '知识库未命中，请换个关键词试试。' }, null, 2)
+    return JSON.stringify(
+      { hits: [], message: '知识库未命中，请换个关键词试试。' },
+      null,
+      2,
+    )
   }
 
+  // citation：仅对本轮 hits 有效；id：稳定 chunk id，角标/溯源用这个定位原文
   return JSON.stringify(
     {
-      hits: hits.map((h) => ({ id: h.id, title: h.title, snippet: h.text })),
+      hits: hits.map((h) => ({
+        citation: h.citation,
+        id: h.id,
+        docId: h.docId,
+        title: h.title,
+        snippet: h.text.length > 160 ? `${h.text.slice(0, 160)}…` : h.text,
+      })),
     },
     null,
     2,
@@ -135,30 +142,38 @@ export async function executeTool(
   name: string,
   rawArgs: string,
 ): Promise<string> {
-  let args: Record<string, unknown> = {}
+  let args: Record<string, unknown> = {};
   try {
-    args = rawArgs ? (JSON.parse(rawArgs) as Record<string, unknown>) : {}
+    args = rawArgs ? (JSON.parse(rawArgs) as Record<string, unknown>) : {};
   } catch {
-    throw new Error(`无法解析工具参数: ${rawArgs}`)
+    throw new Error(`无法解析工具参数: ${rawArgs}`);
   }
 
   switch (name) {
     case 'get_current_time': {
-      const now = new Date()
-      const text = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-      return JSON.stringify({ timezone: 'Asia/Shanghai', now: text })
+      const now = new Date();
+      const text = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+      return JSON.stringify({ timezone: 'Asia/Shanghai', now: text });
     }
     case 'calculator': {
-      const expression = String(args.expression ?? '')
-      if (!expression) throw new Error('缺少 expression')
-      return JSON.stringify({ expression, result: safeCalculate(expression) })
+      const expression = String(args.expression ?? '');
+      if (!expression) throw new Error('缺少 expression');
+      return JSON.stringify({ expression, result: safeCalculate(expression) });
     }
     case 'search_notes': {
-      const query = String(args.query ?? '')
-      if (!query) throw new Error('缺少 query')
-      return searchNotes(query)
+      const query = String(args.query ?? '');
+      if (!query) throw new Error('缺少 query');
+      return searchNotes(query);
+    }
+
+    case 'roll_dice': {
+      const sides = Math.min(Math.max(Number(args.sides ?? 6), 2), 100)
+      const count = Math.min(Math.max(Number(args.count ?? 1), 1), 10)
+      if (count > 10) throw new Error('掷骰子次数不能超过 10');
+      const result = Math.floor(Math.random() * sides) + 1;
+      return JSON.stringify({ sides, count, result });
     }
     default:
-      throw new Error(`未知工具: ${name}`)
+      throw new Error(`未知工具: ${name}`);
   }
 }

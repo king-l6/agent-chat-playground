@@ -59,7 +59,6 @@ export async function streamChat(options: {
 
   // 2) ReadableStream：一块一块读二进制，再用 TextDecoder 转成字符串
   const reader = stream.getReader();
-  console.log('reader', reader);
   const decoder = new TextDecoder();
   let buffer = ''; // 跨 chunk 拼接：上次没收完的半截事件先留着
 
@@ -67,12 +66,10 @@ export async function streamChat(options: {
     const { done, value } = await reader.read();
     if (done) break; // 流结束
     buffer += decoder.decode(value, { stream: true });
-    console.log('buffer', buffer);
     // SSE 约定：事件之间用空行分隔（\n\n）
     const chunks = buffer.split('\n\n');
     // pop 出最后一段：可能还不完整，下次继续拼
     buffer = chunks.pop() ?? '';
-    console.log('buffer', buffer, chunks);
     for (const chunk of chunks) {
       // 一个事件里可能有多行，我们只要以 data: 开头的那行
       const line = chunk

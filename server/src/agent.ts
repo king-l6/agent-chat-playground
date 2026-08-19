@@ -11,13 +11,23 @@ import type {
 import { executeTool, toolDefinitions } from './tools.js';
 import type { ChatMessageInput, SseEvent } from './types.js';
 
-/** 系统提示：告诉模型何时调哪些工具 */
+/**
+ * 系统提示：告诉模型何时调哪些工具
+ *
+ * 规则 3–4 是引用 RAG 专用：
+ *   - 先 search_notes 拿 hits
+ *   - citation 是「本轮检索结果」里的局部编号（1=本轮第一条），不是全库永久编号
+ *   - 稳定身份看 hits[].id；回答里仍写 [1][2] 方便阅读
+ */
 const SYSTEM_PROMPT = `你是「Agent Chat Playground」里的助手，面向求职演示。
 规则：
 1. 需要准确时间时调用 get_current_time。
 2. 需要计算时调用 calculator。
-3. 用户问本项目、SSE、tool calling、技术栈、简历作品相关问题时，先调用 search_notes 再基于结果回答，并在回答里引用片段。
-4. 用简洁中文回答；调用工具后根据工具结果给出最终结论，不要编造工具没返回的内容。`;
+3. 用户问本项目、SSE、tool calling、技术栈、简历、求职缺口、怎么学、学习规划等问题时，先调用 search_notes，再只根据返回的 hits 回答。
+4. 使用 search_notes 后：在相关句子末尾标注引用，格式必须是方括号+数字，例如 [1] 或 [2]。数字必须来自「同一次」工具返回的 hits[].citation（本轮局部编号，1 表示本轮第一条命中）；不要用旧一次检索的编号；不要编造 hits 里没有的内容；未命中就明确说知识库没有。
+5. 用简洁中文回答；调用其它工具后也要根据工具结果给出最终结论。
+6. 用户要掷骰子、随机点数时调用 roll_dice。
+`;
 
 /** 向 SSE 管道推事件的函数类型（由 index.ts 注入） */
 type Send = (event: SseEvent) => void;
@@ -205,7 +215,6 @@ async function runLive(
       { id: string; name: string; arguments: string }
     >();
     let finishReason: string | null = null;
-
     // 消费流：文本立刻推前端；tool_calls 先攒着
     for await (const chunk of stream) {
       const choice = chunk.choices[0];
@@ -243,7 +252,6 @@ async function runLive(
       content: assistantText || null,
       tool_calls: toolCalls,
     });
-    console.log('toolCalls', toolCalls);
     // 逐个执行工具，结果以 role:tool 写回，并推 SSE 给前端卡片
     for (const call of toolCalls) {
       const name = call.function.name;
@@ -292,8 +300,6 @@ export async function runAgentChat(options: {
   const { apiKey, baseURL, model } = resolveLlmConfig();
 
   if (!apiKey) {
-    console.log('999999');
-    
     await streamMock(options.messages, options.send);
     return;
   }
