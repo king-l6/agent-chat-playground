@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SSE 拆包 · 口述稿</title>
+    <style>
+      :root {
+        --bg: #0f1419;
+        --panel: #1a222c;
+        --line: #2c3846;
+        --text: #e7edf4;
+        --muted: #93a4b5;
+        --accent: #3dd6c6;
+        --warn: #f0b429;
+        --code-bg: #0b1015;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "IBM Plex Sans", "PingFang SC", "Noto Sans SC", sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(1200px 600px at 10% -10%, #1d3a3a 0%, transparent 55%),
+          radial-gradient(900px 500px at 100% 0%, #243044 0%, transparent 50%),
+          var(--bg);
+        line-height: 1.65;
+      }
+
+      main {
+        width: min(880px, calc(100% - 2rem));
+        margin: 0 auto;
+        padding: 2.5rem 0 4rem;
+      }
+
+      header {
+        margin-bottom: 2rem;
+        border-bottom: 1px solid var(--line);
+        padding-bottom: 1.25rem;
+      }
+
+      .eyebrow {
+        color: var(--accent);
+        font-size: 0.85rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin: 0 0 0.5rem;
+      }
+
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: clamp(1.6rem, 4vw, 2.2rem);
+        font-weight: 650;
+        letter-spacing: -0.02em;
+      }
+
+      .lead {
+        margin: 0;
+        color: var(--muted);
+        max-width: 40rem;
+      }
+
+      section {
+        background: color-mix(in srgb, var(--panel) 92%, transparent);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 1.25rem 1.35rem;
+        margin-bottom: 1rem;
+      }
+
+      h2 {
+        margin: 0 0 0.85rem;
+        font-size: 1.1rem;
+        color: var(--accent);
+      }
+
+      ol.steps {
+        margin: 0;
+        padding-left: 1.2rem;
+      }
+
+      ol.steps li {
+        margin-bottom: 0.55rem;
+      }
+
+      .script {
+        margin: 0;
+        padding: 1rem 1.1rem;
+        border-left: 3px solid var(--accent);
+        background: var(--code-bg);
+        border-radius: 0 10px 10px 0;
+        color: #d7e6ef;
+        white-space: pre-wrap;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.95rem;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 0.65rem 0.5rem;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 550;
+        width: 38%;
+      }
+
+      code,
+      .mono {
+        font-family: "IBM Plex Mono", "SF Mono", Menlo, monospace;
+        font-size: 0.9em;
+      }
+
+      code {
+        background: var(--code-bg);
+        padding: 0.12em 0.35em;
+        border-radius: 4px;
+      }
+
+      pre.packet {
+        margin: 0.75rem 0 0;
+        padding: 0.9rem 1rem;
+        background: var(--code-bg);
+        border-radius: 10px;
+        overflow-x: auto;
+        color: #c9d7e3;
+        font-family: "IBM Plex Mono", Menlo, monospace;
+        font-size: 0.85rem;
+      }
+
+      .warn {
+        color: var(--warn);
+      }
+
+      .quiz li {
+        margin-bottom: 0.7rem;
+      }
+
+      footer {
+        margin-top: 1.5rem;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">Agent Chat Playground · 学习口述</p>
+        <h1>SSE 拆包怎么说清楚</h1>
+        <p class="lead">
+          说不清这段，先别钻 tool 多轮。对着浏览器 Network 里的
+          <code>chat</code> 响应，把下面稿子说一遍。
+        </p>
+      </header>
+
+      <section>
+        <h2>30 秒口述版（背这个骨架）</h2>
+        <p class="script">后端用 text/event-stream，不是一次返回完整 JSON，而是持续往连接里写小块数据。
+每条事件长这样：data: {JSON}\n\n，空行 \n\n 表示一条事件结束。
+前端拿到的是 ReadableStream，reader.read() 每次只读到一段二进制，切包边界和网络 chunk 对不齐，所以要：
+1）TextDecoder 转成字符串拼进 buffer；
+2）按 \n\n 切开，完整的事件拿去处理，最后半截留在 buffer 下次再拼；
+3）从事件里找出 data: 行，去掉前缀，JSON.parse 成 SseEvent，回调给 UI 追加文字或更新工具卡片。
+点停止就 AbortController.abort()，中断这条流。</p>
+      </section>
+
+      <section>
+        <h2>五步拆开记</h2>
+        <ol class="steps">
+          <li>协议：SSE，不是一次性 JSON。</li>
+          <li>格式：<code>data: {...}\n\n</code>，空行分隔事件。</li>
+          <li>读流：<code>ReadableStream</code> + <code>reader.read()</code>。</li>
+          <li>拆包：<code>buffer</code> 拼接 → <code>split('\n\n')</code> → <code>pop</code> 半截。</li>
+          <li>落地：<code>JSON.parse</code> → <code>onEvent</code> → UI 更新；停止用 <code>AbortController</code>。</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>对照本项目 <code>src/api/chat.ts</code></h2>
+        <table>
+          <thead>
+            <tr>
+              <th>嘴里说的</th>
+              <th>代码里对应</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>发请求拿流</td>
+              <td class="mono">axios.post + responseType: 'stream'</td>
+            </tr>
+            <tr>
+              <td>一块块读</td>
+              <td class="mono">reader.read() 循环</td>
+            </tr>
+            <tr>
+              <td>拼半截</td>
+              <td class="mono">buffer += decoder.decode(...)</td>
+            </tr>
+            <tr>
+              <td>按事件切开</td>
+              <td class="mono">buffer.split('\n\n')</td>
+            </tr>
+            <tr>
+              <td>半截留给下次</td>
+              <td class="mono">buffer = chunks.pop()</td>
+            </tr>
+            <tr>
+              <td>取出 JSON 回调</td>
+              <td class="mono">找 data: → slice(5) → JSON.parse → onEvent</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>为什么要 <code>buffer</code>（一句话 + 例子）</h2>
+        <p>
+          网络 chunk 边界和事件边界往往对不齐。若直接 parse 半截，会挂；所以
+          <strong>完整事件立刻处理，半截先存着</strong>。
+        </p>
+        <pre class="packet">data: {"type":"text_delta","delta":"你"}\n\n
+data: {"type":"text_de   ← 这条被砍半了，留在 buffer</pre>
+      </section>
+
+      <section>
+        <h2>自测三问 <span class="warn">（答不上就别跳 tool 多轮）</span></h2>
+        <ol class="quiz">
+          <li>SSE 一条事件和普通 HTTP JSON 响应差在哪？</li>
+          <li>
+            为什么 <code>split('\n\n')</code> 之后还要
+            <code>pop</code> 回 buffer？
+          </li>
+          <li>
+            <code>onEvent</code> 之后 UI 怎么变？（答：<code>App.handleEvent</code>
+            按 <code>type</code> 改 state）
+          </li>
+        </ol>
+      </section>
+
+      <footer>
+        打开方式：用浏览器直接打开本文件。练口述时盯着 Network → chat →
+        Response。
+      </footer>
+    </main>
+  </body>
+</html>

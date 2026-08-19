@@ -1,5 +1,11 @@
+/**
+ * 本地工具定义 + 执行
+ * - toolDefinitions：告诉模型「有哪些工具、参数长什么样」（OpenAI tools schema）
+ * - executeTool：服务端真正跑工具，返回 JSON 字符串
+ */
 import type { ChatCompletionTool } from 'openai/resources/chat/completions'
 
+/** 交给大模型的工具清单（function calling schema） */
 export const toolDefinitions: ChatCompletionTool[] = [
   {
     type: 'function',
@@ -52,6 +58,7 @@ export const toolDefinitions: ChatCompletionTool[] = [
   },
 ]
 
+/** 演示用「知识库」几条笔记（真 RAG 会换成切分后的文档块） */
 const DEMO_NOTES: Array<{ id: string; title: string; text: string }> = [
   {
     id: '1',
@@ -75,6 +82,10 @@ const DEMO_NOTES: Array<{ id: string; title: string; text: string }> = [
   },
 ]
 
+/**
+ * 安全一点的四则运算：先白名单校验字符，再用 Function 求值
+ * （演示用；生产应换更严的表达式解析器）
+ */
 function safeCalculate(expression: string): string {
   const normalized = expression.replace(/\s+/g, '')
   if (!/^[\d+\-*/().]+$/.test(normalized)) {
@@ -88,6 +99,10 @@ function safeCalculate(expression: string): string {
   return String(value)
 }
 
+/**
+ * 关键词命中 DEMO_NOTES，最多返回 3 条
+ * 返回值是 JSON 字符串，方便模型阅读并引用
+ */
 function searchNotes(query: string): string {
   const q = query.toLowerCase()
   const hits = DEMO_NOTES.filter(
@@ -110,6 +125,12 @@ function searchNotes(query: string): string {
   )
 }
 
+/**
+ * 按工具名分发执行
+ * @param name    工具名（来自模型 tool_calls）
+ * @param rawArgs 参数 JSON 字符串
+ * @returns       给模型 / 前端看的结果字符串（一般是 JSON）
+ */
 export async function executeTool(
   name: string,
   rawArgs: string,
