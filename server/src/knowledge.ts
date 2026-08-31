@@ -2,21 +2,21 @@
  * 迷你知识库（引用 RAG）
  *
  * 整条链路：
- *   读 .md 文档 → 切成 chunk（稳定 id）→ 改写 query → 关键词打分 → TopK
- *   citation 不在入库时全局编号，而在「本轮检索结果」里临时编成 1..K
- *   回答里的 [1][2] 只对应当次 hits；跨文档定位靠稳定的 chunk.id
+ *   读文档（内置 + 手册 + uploads）→ overlap 切块 →（retrieve.ts）embedding → TopK
+ *   citation 在本轮 hits 里临时编成 1..K；跨文档定位靠 chunk.id
  *
  * 被谁调用：tools.ts 的 searchNotes → executeTool('search_notes')
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
 /** 知识库里的一块文本（入库后的稳定结构，不含 citation） */
 export type KnowledgeChunk = {
-  /** 块唯一 id，如 handbook-3、project-2；文档增减时尽量保持稳定 */
+  /** 块唯一 id：{docId}-c{序号}，不跟文件名走 */
   id: string
-  /** 来自哪篇文档，如 handbook / project */
+  /** 文档稳定 id：内置 project/handbook，上传 d_xxxxxxxx */
   docId: string
   /** 块标题，一般来自 Markdown 的 ## 标题 */
   title: string
@@ -39,8 +39,208 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // 仓库根目录：knowledge.ts 在 server/src/，往上两级就是项目根
 const ROOT = path.resolve(__dirname, '../..')
 
+export const DATA_DIR = path.join(ROOT, 'server', 'data')
+export const UPLOAD_DIR = path.join(DATA_DIR, 'uploads')
+export const INDEX_PATH = path.join(DATA_DIR, 'index.json')
+const MANIFEST_PATH = path.join(DATA_DIR, 'manifest.json')
+
+export function ensureDataDirs() {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true })
+}
+
+type ManifestDoc = {
+  id: string
+  /** 磁盘上的文件名，等于 {id}.md，避免中文/乱码当路径 */
+  storedAs: string
+  /** 给人看的原名 */
+  originalName: string
+}
+
+type ManifestFile = { docs: ManifestDoc[] }
+
+/** 内置文档占用的 id，上传的 d_* 不能撞上 */
+const RESERVED_DOC_IDS = new Set(['project', 'handbook'])
+
+/**
+ * 8 字节随机 + 对照已有 id。
+ * 只 randomBytes(4) 且不查表：生日悖论下量一大就可能撞；「几乎不重复」≠ 唯一。
+ */
+function newDocId(used: Set<string>): string {
+  for (let i = 0; i < 32; i += 1) {
+    const id = `d_${randomBytes(8).toString('hex')}`
+    if (!used.has(id) && !RESERVED_DOC_IDS.has(id)) return id
+  }
+  throw new Error('无法生成唯一文档 id')
+}
+
+function readManifest(): ManifestFile {
+  try {
+    const raw = fs.readFileSync(MANIFEST_PATH, 'utf8')
+    const parsed = JSON.parse(raw) as ManifestFile
+    if (Array.isArray(parsed.docs)) return parsed
+  } catch {
+    // 没有清单就当空
+  }
+  return { docs: [] }
+}
+
+function writeManifest(file: ManifestFile) {
+  ensureDataDirs()
+  fs.writeFileSync(MANIFEST_PATH, JSON.stringify(file, null, 2))
+}
+
+/** 把旧的「按文件名当 id」的上传，迁到 d_xxx + manifest */
+function migrateLegacyUploads(keepTmpPath?: string) {
+  ensureDataDirs()
+  const file = readManifest()
+  const known = new Set(file.docs.map((d) => d.storedAs))
+  let changed = false
+  const keepTmp = keepTmpPath ? path.basename(keepTmpPath) : ''
+
+  for (const name of fs.readdirSync(UPLOAD_DIR)) {
+    if (name.startsWith('tmp-')) {
+      // 正在 commit 的临时文件不能删，否则后面 rename 会 ENOENT → 上传 500
+      if (name === keepTmp) continue
+      try {
+        fs.unlinkSync(path.join(UPLOAD_DIR, name))
+      } catch {
+        // ignore
+      }
+      continue
+    }
+    if (!/\.(md|txt|markdown)$/i.test(name)) continue
+    if (known.has(name)) continue
+
+    const existing = name.match(/^(d_[a-f0-9]{8,})(\.[a-z0-9]+)$/i)
+    if (existing) {
+      file.docs.push({
+        id: existing[1],
+        storedAs: name,
+        originalName: name,
+      })
+      known.add(name)
+      changed = true
+      continue
+    }
+
+    const ext = path.extname(name) || '.md'
+    const usedIds = new Set(file.docs.map((d) => d.id))
+    const id = newDocId(usedIds)
+    const storedAs = `${id}${ext}`
+    fs.renameSync(path.join(UPLOAD_DIR, name), path.join(UPLOAD_DIR, storedAs))
+    file.docs.push({ id, storedAs, originalName: name })
+    known.add(storedAs)
+    changed = true
+    console.log(`[knowledge] 迁移上传 ${name} → ${id}`)
+  }
+
+  if (changed) writeManifest(file)
+}
+
+export function listUploadRecords(): ManifestDoc[] {
+  migrateLegacyUploads()
+  return readManifest().docs
+}
+
+/**
+ * 上传落盘：每次都是新文档（新 d_xxx）。
+ * 文件名只是标签，两份都叫 简历.md 但内容不同，必须是两条，不能按文件名覆盖。
+ * 要换掉旧的：在文档页删掉再传。
+ */
+export function commitUpload(tmpPath: string, originalName: string): ManifestDoc {
+  migrateLegacyUploads(tmpPath)
+  const file = readManifest()
+  const ext = path.extname(originalName).toLowerCase() || '.md'
+  const used = new Set(file.docs.map((d) => d.id))
+  const rec: ManifestDoc = {
+    id: newDocId(used),
+    storedAs: '',
+    originalName,
+  }
+  rec.storedAs = `${rec.id}${ext}`
+  file.docs.push(rec)
+
+  const dest = path.join(UPLOAD_DIR, rec.storedAs)
+  fs.renameSync(tmpPath, dest)
+  writeManifest(file)
+  return rec
+}
+
+export function deleteUploadByDocId(docId: string): void {
+  const file = readManifest()
+  const rec = file.docs.find((d) => d.id === docId)
+  if (!rec) throw new Error('文档不存在')
+  const full = path.join(UPLOAD_DIR, rec.storedAs)
+  if (fs.existsSync(full)) fs.unlinkSync(full)
+  writeManifest({ docs: file.docs.filter((d) => d.id !== docId) })
+}
+
+/** 丢掉内存切块缓存，上传/删除后必须调，否则还在用旧文档 */
+let cached: KnowledgeChunk[] | null = null
+
+export function invalidateChunks() {
+  cached = null
+}
+
+/**
+ * multer 常把 UTF-8 中文文件名当成 latin1，于是「手册.md」变成乱码，
+ * 再被下面的白名单替换成 __________________.md。先按 latin1→utf8 救回来。
+ */
+export function decodeMulterName(raw: string): string {
+  const utf8 = Buffer.from(raw, 'latin1').toString('utf8')
+  const han = (s: string) => (s.match(/[\u4e00-\u9fff]/g) ?? []).length
+  return han(utf8) > han(raw) ? utf8 : raw
+}
+
+/** 落盘用的临时名；真正文件名在 commitUpload 里改成 {docId}.md */
+export function tempUploadFilename(): string {
+  return `tmp-${Date.now()}-${randomBytes(3).toString('hex')}`
+}
+
+export type KnowledgeDoc = {
+  docId: string
+  source: 'builtin' | 'upload'
+  filename?: string
+  title: string
+  chunkCount: number
+  bytes?: number
+}
+
+/** 知识库页用：内置文档 + 上传文件 */
+export function listDocuments(): KnowledgeDoc[] {
+  const chunks = getChunks()
+  const uploads = new Map(listUploadRecords().map((d) => [d.id, d]))
+  const map = new Map<string, KnowledgeDoc>()
+  for (const chunk of chunks) {
+    const rec = uploads.get(chunk.docId)
+    const source = rec ? 'upload' : 'builtin'
+    const prev = map.get(chunk.docId)
+    if (prev) {
+      prev.chunkCount += 1
+      continue
+    }
+    map.set(chunk.docId, {
+      docId: chunk.docId,
+      source,
+      filename: rec?.originalName,
+      title: rec?.originalName || chunk.title,
+      chunkCount: 1,
+    })
+  }
+  ensureDataDirs()
+  for (const rec of Array.from(uploads.values())) {
+    const row = map.get(rec.id)
+    if (!row) continue
+    const full = path.join(UPLOAD_DIR, rec.storedAs)
+    if (fs.existsSync(full)) row.bytes = fs.statSync(full).size
+  }
+  return Array.from(map.values())
+}
+
 /** 单块最大字符数，太长就再切一刀 */
 const MAX_CHUNK_CHARS = 280
+/** 相邻块重叠字数：避免一句被切两半后两边都检索不到完整语义 */
+const CHUNK_OVERLAP = 60
 /** 太短的块丢掉，避免空片段污染检索 */
 const MIN_CHUNK_CHARS = 20
 /**
@@ -158,14 +358,14 @@ function splitOversized(
   text: string,
   title: string,
 ): Array<{ title: string; text: string }> {
-  // 没超长：整段就是一块
   if (text.length <= MAX_CHUNK_CHARS) return [{ title, text }]
 
   const parts: Array<{ title: string; text: string }> = []
-  // 步长 = MAX_CHUNK_CHARS，滑动窗口切分（演示用，生产可加 overlap 重叠）
-  for (let i = 0; i < text.length; i += MAX_CHUNK_CHARS) {
+  const step = MAX_CHUNK_CHARS - CHUNK_OVERLAP
+  for (let i = 0; i < text.length; i += step) {
     const slice = text.slice(i, i + MAX_CHUNK_CHARS).trim()
     if (slice.length >= MIN_CHUNK_CHARS) parts.push({ title, text: slice })
+    if (i + MAX_CHUNK_CHARS >= text.length) break
   }
   return parts
 }
@@ -201,16 +401,15 @@ function chunkMarkdown(
     pieces.push(...splitOversized(body, title))
   }
 
-  // 稳定 id：同一 doc 内按切块顺序编号（handbook-1, handbook-2…）
   return pieces.map((p, i) => ({
-    id: `${docId}-${i + 1}`,
+    id: `${docId}-c${i + 1}`,
     docId,
     title: p.title,
     text: p.text,
   }))
 }
 
-/** 启动时加载全部文档并切块（内置说明 + 求职补充手册.md） */
+/** 启动时加载全部文档并切块（内置说明 + 手册 + uploads） */
 function loadAllChunks(): KnowledgeChunk[] {
   const chunks: KnowledgeChunk[] = []
 
@@ -228,14 +427,22 @@ function loadAllChunks(): KnowledgeChunk[] {
     console.warn('[knowledge] 读取求职补充手册.md 失败:', err)
   }
 
-  // 不再做全局 citation=1..N；编号改到 searchChunks 本轮结果里
+  // 3) 用户上传：磁盘文件是 {docId}.md，原名在 manifest 里
+  try {
+    for (const rec of listUploadRecords()) {
+      const full = path.join(UPLOAD_DIR, rec.storedAs)
+      if (!fs.existsSync(full)) continue
+      const raw = fs.readFileSync(full, 'utf8')
+      chunks.push(...chunkMarkdown(rec.id, raw, rec.originalName))
+    }
+  } catch (err) {
+    console.warn('[knowledge] 读取 uploads 失败:', err)
+  }
+
   return chunks
 }
 
-/** 内存缓存：只 load 一次，避免每次 search 都读盘切分 */
-let cached: KnowledgeChunk[] | null = null
-
-/** 拿到全部 chunk（懒加载 + 缓存） */
+/** 拿到全部 chunk（懒加载 + 缓存；invalidateChunks 之后会重新 load） */
 export function getChunks(): KnowledgeChunk[] {
   if (!cached) cached = loadAllChunks()
   return cached

@@ -5,9 +5,26 @@
 import cors from 'cors'
 import dotenv from 'dotenv'
 import express from 'express'
+import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import multer from 'multer'
 import { resolveLlmConfig, runAgentChat } from './agent.js'
+import {
+  UPLOAD_DIR,
+  commitUpload,
+  decodeMulterName,
+  ensureDataDirs,
+  invalidateChunks,
+  listDocuments,
+  tempUploadFilename,
+} from './knowledge.js'
+import {
+  deleteUploadedFile,
+  ensureIndex,
+  getRagStatus,
+  listIndexRows,
+} from './retrieve.js'
 import type { ChatMessageInput, SseEvent } from './types.js'
 
 // ESM 下没有 __dirname，用当前模块 URL 推出来
@@ -22,20 +39,88 @@ const PORT = Number(process.env.PORT || 8790)
 app.use(
   cors({
     origin: true,
-    methods: ['GET', 'POST', 'OPTIONS'],
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   }),
 )
 // 解析 JSON body，限制 1MB
 app.use(express.json({ limit: '1mb' }))
 
-/** GET /api/health：前端徽章用，看 live/mock 和模型名 */
+ensureDataDirs()
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+    filename: (_req, _file, cb) => {
+      cb(null, tempUploadFilename())
+    },
+  }),
+  limits: { fileSize: 2 * 1024 * 1024 },
+})
+
+/** GET /api/health：前端徽章用，看 live/mock、模型名、RAG 索引 */
 app.get('/api/health', (_req, res) => {
   const { apiKey, model } = resolveLlmConfig()
   res.json({
     ok: true,
     mode: apiKey ? 'live' : 'mock',
     model,
+    rag: getRagStatus(),
   })
+})
+
+app.get('/api/knowledge', (_req, res) => {
+  const rag = getRagStatus()
+  res.json({
+    rag,
+    documents: listDocuments(),
+    index: {
+      model: rag.embedding,
+      dim: rag.dim,
+      chunks: listIndexRows(),
+    },
+  })
+})
+
+/**
+ * POST /api/knowledge/upload
+ * 表单字段名 file，仅 .md / .txt。每次上传新建文档，不按文件名覆盖。
+ */
+app.post('/api/knowledge/upload', upload.single('file'), async (req, res) => {
+  const file = req.file
+  if (!file) {
+    res.status(400).json({ error: '请选择文件' })
+    return
+  }
+  const original = decodeMulterName(file.originalname)
+  if (!/\.(md|txt|markdown)$/i.test(original)) {
+    fs.unlinkSync(file.path)
+    res.status(400).json({ error: '仅支持 .md / .txt' })
+    return
+  }
+  try {
+    const rec = commitUpload(file.path, path.basename(original))
+    invalidateChunks()
+    await ensureIndex()
+    res.json({
+      ok: true,
+      filename: rec.originalName,
+      docId: rec.id,
+      rag: getRagStatus(),
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
+  }
+})
+
+app.delete('/api/knowledge/docs/:docId', async (req, res) => {
+  try {
+    await deleteUploadedFile(decodeURIComponent(String(req.params.docId)))
+    res.json({ ok: true, rag: getRagStatus(), documents: listDocuments() })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(404).json({ error: message })
+  }
 })
 
 /**
@@ -95,4 +180,7 @@ app.listen(PORT, () => {
   const { apiKey, model } = resolveLlmConfig()
   const mode = apiKey ? 'live' : 'mock'
   console.log(`[agent-chat] http://127.0.0.1:${PORT}  mode=${mode}  model=${model}`)
+  void ensureIndex().catch((err) => {
+    console.warn('[rag] 启动索引失败，先走关键词:', err)
+  })
 })

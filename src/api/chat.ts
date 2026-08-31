@@ -103,11 +103,75 @@ export function toApiMessages(messages: UiMessage[]) {
 }
 
 /** 探测后端是否在线，以及当前是 live 还是 mock */
+export type RagStatus = {
+  chunks: number
+  docs: number
+  retrieval: string
+  embedding: string
+  indexed: number
+  dim?: number
+  embedError: string | null
+}
+
+export type KnowledgeDoc = {
+  docId: string
+  source: 'builtin' | 'upload'
+  filename?: string
+  title: string
+  chunkCount: number
+  bytes?: number
+}
+
+export type IndexRow = {
+  id: string
+  docId: string
+  title: string
+  head: string
+  tail: string | null
+  chars: number
+  dim: number
+  vectorHead: number[]
+}
+
 export async function fetchHealth() {
   const { data } = await axios.get<{
-    ok: boolean;
-    mode: string;
-    model?: string;
+    ok: boolean
+    mode: string
+    model?: string
+    rag?: RagStatus
   }>(`${API_BASE}/api/health`);
+  return data;
+}
+
+export async function fetchKnowledgeBoard() {
+  const { data } = await axios.get<{
+    rag: RagStatus
+    documents: KnowledgeDoc[]
+    index: { model: string; dim: number; chunks: IndexRow[] }
+  }>(`${API_BASE}/api/knowledge`);
+  return data;
+}
+
+/** 上传知识库文档（multipart 字段名 file） */
+export async function uploadKnowledge(file: File) {
+  const body = new FormData();
+  body.append('file', file);
+  const { data } = await axios.post<{
+    ok: boolean;
+    filename: string;
+    originalName?: string;
+    docId: string;
+    rag: RagStatus;
+    error?: string;
+  }>(`${API_BASE}/api/knowledge/upload`, body);
+  return data;
+}
+
+export async function deleteKnowledgeFile(docId: string) {
+  const { data } = await axios.delete<{
+    ok: boolean;
+    rag: RagStatus;
+    documents: KnowledgeDoc[];
+  }>(`${API_BASE}/api/knowledge/docs/${encodeURIComponent(docId)}`);
   return data;
 }

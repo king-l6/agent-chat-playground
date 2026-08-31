@@ -4,8 +4,8 @@
  * - executeTool：服务端真正跑工具，返回 JSON 字符串
  */
 import type { ChatCompletionTool } from 'openai/resources/chat/completions'
-// 引用 RAG：检索逻辑在 knowledge.ts，这里只负责「工具入口 + 格式化 JSON 返回」
-import { rewriteQuery, searchChunks } from './knowledge.js'
+// 引用 RAG：retrieve.ts 负责向量/关键词，这里只做工具入口 + JSON
+import { retrieve } from './retrieve.js'
 
 /** 交给大模型的工具清单（function calling schema） */
 export const toolDefinitions: ChatCompletionTool[] = [
@@ -45,14 +45,14 @@ export const toolDefinitions: ChatCompletionTool[] = [
     function: {
       name: 'search_notes',
       description:
-        '在本地知识库中检索文档片段（含项目说明与求职补充手册）。当用户问项目、SSE、tool calling、技术栈、简历缺口、怎么学、求职规划等问题时调用。query 请填 2～6 个关键词，不要把用户原句整段传入。',
+        '在本地知识库中检索文档片段（内置说明、求职手册、用户上传的 md/txt）。当用户问项目、SSE、简历缺口、上传文档内容、怎么学等问题时调用。query 可以是原句或关键词。',
       parameters: {
         type: 'object',
         properties: {
           query: {
             type: 'string',
             description:
-              '空格分隔的检索词，例如 "简历缺口 Agent 前端" 或 "SSE 流式"；不要传完整问句',
+              '检索词或原句。向量检索可直接传用户问题；关键词回退时服务端会改写。',
           },
         },
         required: ['query'],
@@ -102,22 +102,20 @@ function safeCalculate(expression: string): string {
 
 /**
  * search_notes 工具的真正实现
- * 流程：query → rewriteQuery → searchChunks(Top3) → JSON 给模型 / 前端卡片
+ * 流程：retrieve（向量优先，否则关键词）→ JSON 给模型 / 前端卡片
  */
-function searchNotes(query: string): string {
-  // 先改写再搜：同一轮工具调用里完成，前端仍只看到 1 张卡片
-  const { original, rewritten, terms } = rewriteQuery(query)
-  const hits = searchChunks(rewritten, 3)
+async function searchNotes(query: string): Promise<string> {
+  const result = await retrieve(query, 3)
+  const { hits, mode } = result
 
-  // instruction 写进工具结果：模型下一轮会把它当「已发生的事实」读到
-  // 比只写在 system prompt 里更硬一点——prompt 容易被「再搜一下」冲掉
   if (hits.length === 0) {
     return JSON.stringify(
       {
         hits: [],
-        query: original,
-        query_used: rewritten,
-        rewrite_terms: terms,
+        retrieval: mode,
+        query: result.query,
+        query_used: result.query_used,
+        rewrite_terms: result.rewrite_terms,
         message:
           '知识库未命中或相关度过低。请换更短、更具体的关键词（例如「简历缺口」而不是整句问题）。',
         instruction:
@@ -128,12 +126,12 @@ function searchNotes(query: string): string {
     )
   }
 
-  // citation：仅对本轮 hits 有效；id：稳定 chunk id，角标/溯源用这个定位原文
   return JSON.stringify(
     {
-      query: original,
-      query_used: rewritten,
-      rewrite_terms: terms,
+      retrieval: mode,
+      query: result.query,
+      query_used: result.query_used,
+      rewrite_terms: result.rewrite_terms,
       hits: hits.map((h) => ({
         citation: h.citation,
         id: h.id,
@@ -181,7 +179,7 @@ export async function executeTool(
     case 'search_notes': {
       const query = String(args.query ?? '');
       if (!query) throw new Error('缺少 query');
-      return searchNotes(query);
+      return await searchNotes(query);
     }
 
     case 'roll_dice': {

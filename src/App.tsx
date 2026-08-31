@@ -4,14 +4,23 @@
  * - 调 streamChat，把 SSE 事件落到某一条助手消息上
  */
 import { useEffect, useRef, useState } from 'react';
-import { streamChat, toApiMessages, fetchHealth } from './api/chat';
+import { streamChat, toApiMessages, fetchHealth, type RagStatus } from './api/chat';
 import type { SseEvent, UiMessage } from './types';
 import { MessageList } from './components/MessageList';
+import { DocumentsPage } from './components/DocumentsPage';
+import { VectorsPage } from './components/VectorsPage';
 import './components/AppShell.css';
 
 /** 生成前端本地唯一 id（消息 id、助手气泡 id） */
 function uid() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function pageFromHash(): 'chat' | 'documents' | 'vectors' {
+  const path = location.hash.replace(/^#\/?/, '').split('?')[0]
+  if (path.startsWith('vectors')) return 'vectors'
+  if (path.startsWith('documents') || path.startsWith('knowledge')) return 'documents'
+  return 'chat'
 }
 
 export default function App() {
@@ -24,6 +33,8 @@ export default function App() {
   /** 右上角徽章：live / mock / 未连接 */
   const [mode, setMode] = useState<'live' | 'mock' | 'unknown'>('unknown');
   const [model, setModel] = useState<string>('');
+  const [rag, setRag] = useState<RagStatus | null>(null);
+  const [page, setPage] = useState<'chat' | 'documents' | 'vectors'>(pageFromHash);
   /** 顶部/底部错误条 */
   const [error, setError] = useState<string>('');
   /** 当前请求的 AbortController，点停止时 abort */
@@ -31,12 +42,19 @@ export default function App() {
   /** 锚点：消息变了滚到底部 */
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
+  useEffect(() => {
+    const onHash = () => setPage(pageFromHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
   // 进页先 ping 一下健康检查
   useEffect(() => {
     fetchHealth()
       .then((data) => {
         setMode(data.mode === 'live' ? 'live' : 'mock');
         setModel(data.model || '');
+        if (data.rag) setRag(data.rag);
       })
       .catch(() => setMode('unknown'));
   }, []);
@@ -205,21 +223,53 @@ export default function App() {
   }
 
   return (
-    <div className='app'>
+    <div className={page === 'chat' ? 'app' : 'app app--kb'}>
       <header className='topbar'>
         <div>
           <div className='brand'>Agent Chat Playground</div>
-          <div className='sub'>SSE 流式 · Tool Calling 卡片 · 简易检索</div>
+          <div className='sub'>SSE 流式 · Tool Calling · 知识库 / 向量索引</div>
         </div>
-        <div className={`badge badge--${mode}`}>
-          {mode === 'live' && `LIVE${model ? ` · ${model}` : ''}`}
-          {mode === 'mock' && 'MOCK（未配置 API Key）'}
-          {mode === 'unknown' && '后端未连接'}
+        <div className="topbar__right">
+          <nav className="nav">
+            <a className={page === 'chat' ? 'nav__link nav__link--on' : 'nav__link'} href="#/">
+              对话
+            </a>
+            <a
+              className={page === 'documents' ? 'nav__link nav__link--on' : 'nav__link'}
+              href="#/documents"
+            >
+              文档
+            </a>
+            <a
+              className={page === 'vectors' ? 'nav__link nav__link--on' : 'nav__link'}
+              href="#/vectors"
+            >
+              向量库
+            </a>
+          </nav>
+          <div className={`badge badge--${mode}`}>
+            {mode === 'live' && `LIVE${model ? ` · ${model}` : ''}`}
+            {mode === 'mock' && 'MOCK（未配置 API Key）'}
+            {mode === 'unknown' && '后端未连接'}
+          </div>
         </div>
       </header>
 
+      {page === 'documents' ? (
+        <DocumentsPage />
+      ) : page === 'vectors' ? (
+        <VectorsPage />
+      ) : (
+        <>
       <main className='main'>
-        {JSON.stringify(messages)}
+        {rag && (
+          <p className="rag-hint">
+            <a href="#/vectors">
+              检索 {rag.retrieval} · {rag.indexed}/{rag.chunks} 已编码 · {rag.docs} 篇
+            </a>
+            {rag.embedError ? ` · embed失败将走关键词` : ''}
+          </p>
+        )}
         <MessageList messages={messages} />
         {/* 滚动锚点 */}
         <div ref={bottomRef} />
@@ -230,7 +280,7 @@ export default function App() {
 
         {/* 一键示例问题 */}
         <div className='hints'>
-          {['现在几点了？', '帮我算 123*456', '这个项目技术栈是什么？'].map(
+          {['现在几点了？', '帮我算 123*456', '这个项目技术栈是什么？', '我的短板在哪？'].map(
             (q) => (
               <button
                 key={q}
@@ -276,6 +326,8 @@ export default function App() {
           )}
         </form>
       </footer>
+        </>
+      )}
     </div>
   );
 }

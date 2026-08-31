@@ -1,0 +1,156 @@
+.kb {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.25rem 1rem 2.5rem;
+  display: grid;
+  gap: 1.1rem;
+}
+
+.kb__hint {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #64748b;
+}
+
+.kb-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.kb-card__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1rem 1.1rem 0.75rem;
+}
+
+.kb-card h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.kb-card p {
+  margin: 0.25rem 0 0;
+  font-size: 0.82rem;
+  color: #64748b;
+}
+
+.upload--busy {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.kb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.kb-table th,
+.kb-table td {
+  text-align: left;
+  padding: 0.65rem 1.1rem;
+  border-top: 1px solid #f1f5f9;
+  vertical-align: top;
+}
+
+.kb-table th {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  font-weight: 650;
+}
+
+.kb-table__meta {
+  margin-top: 0.15rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+
+.kb-table__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.kb-link {
+  font-size: 0.78rem;
+  font-weight: 650;
+  color: #1d4ed8;
+  text-decoration: none;
+}
+
+.kb-link:hover {
+  text-decoration: underline;
+}
+
+.kb-card--focus {
+  outline: 2px solid #93c5fd;
+}
+
+.kb-del {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+  border-radius: 8px;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.kb-index {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0 1.1rem 1.1rem;
+}
+
+.kb-chunk {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 0.7rem 0.8rem;
+  background: #f8fafc;
+}
+
+.kb-chunk__id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  color: #64748b;
+}
+
+.kb-chunk__title {
+  font-weight: 650;
+  margin: 0.2rem 0 0.35rem;
+}
+
+.kb-chunk__text {
+  margin: 0 0 0.4rem;
+  font-size: 0.82rem;
+  color: #334155;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.kb-chunk__head {
+  background: #ecfdf5;
+}
+
+.kb-chunk__tail {
+  background: #eff6ff;
+}
+
+.kb-chunk__ellipsis {
+  color: #94a3b8;
+  font-weight: 700;
+  padding: 0 0.15rem;
+}
+
+.kb-chunk code {
+  font-size: 0.72rem;
+  color: #1d4ed8;
+  word-break: break-all;
+}
