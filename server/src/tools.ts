@@ -5,7 +5,7 @@
  */
 import type { ChatCompletionTool } from 'openai/resources/chat/completions'
 // 引用 RAG：检索逻辑在 knowledge.ts，这里只负责「工具入口 + 格式化 JSON 返回」
-import { searchChunks } from './knowledge.js'
+import { rewriteQuery, searchChunks } from './knowledge.js'
 
 /** 交给大模型的工具清单（function calling schema） */
 export const toolDefinitions: ChatCompletionTool[] = [
@@ -45,13 +45,14 @@ export const toolDefinitions: ChatCompletionTool[] = [
     function: {
       name: 'search_notes',
       description:
-        '在本地知识库中检索文档片段（含项目说明与求职补充手册）。当用户问项目、SSE、tool calling、技术栈、简历缺口、怎么学、求职规划等问题时调用。',
+        '在本地知识库中检索文档片段（含项目说明与求职补充手册）。当用户问项目、SSE、tool calling、技术栈、简历缺口、怎么学、求职规划等问题时调用。query 请填 2～6 个关键词，不要把用户原句整段传入。',
       parameters: {
         type: 'object',
         properties: {
           query: {
             type: 'string',
-            description: '检索关键词或问题',
+            description:
+              '空格分隔的检索词，例如 "简历缺口 Agent 前端" 或 "SSE 流式"；不要传完整问句',
           },
         },
         required: ['query'],
@@ -101,16 +102,27 @@ function safeCalculate(expression: string): string {
 
 /**
  * search_notes 工具的真正实现
- * 流程：query → searchChunks(Top3，本轮 citation=1..K) → JSON 给模型 / 前端卡片
+ * 流程：query → rewriteQuery → searchChunks(Top3) → JSON 给模型 / 前端卡片
  */
 function searchNotes(query: string): string {
-  // 从 knowledge 模块拿最相关的 3 个 chunk（已带本轮局部 citation）
-  const hits = searchChunks(query, 3)
+  // 先改写再搜：同一轮工具调用里完成，前端仍只看到 1 张卡片
+  const { original, rewritten, terms } = rewriteQuery(query)
+  const hits = searchChunks(rewritten, 3)
 
-  // 没命中：告诉模型别瞎编，换关键词
+  // instruction 写进工具结果：模型下一轮会把它当「已发生的事实」读到
+  // 比只写在 system prompt 里更硬一点——prompt 容易被「再搜一下」冲掉
   if (hits.length === 0) {
     return JSON.stringify(
-      { hits: [], message: '知识库未命中，请换个关键词试试。' },
+      {
+        hits: [],
+        query: original,
+        query_used: rewritten,
+        rewrite_terms: terms,
+        message:
+          '知识库未命中或相关度过低。请换更短、更具体的关键词（例如「简历缺口」而不是整句问题）。',
+        instruction:
+          '未命中。可以换一个更短的中文关键词再搜一次；仍没有则明确说知识库没有，不要继续搜。',
+      },
       null,
       2,
     )
@@ -119,13 +131,19 @@ function searchNotes(query: string): string {
   // citation：仅对本轮 hits 有效；id：稳定 chunk id，角标/溯源用这个定位原文
   return JSON.stringify(
     {
+      query: original,
+      query_used: rewritten,
+      rewrite_terms: terms,
       hits: hits.map((h) => ({
         citation: h.citation,
         id: h.id,
         docId: h.docId,
         title: h.title,
         snippet: h.text.length > 160 ? `${h.text.slice(0, 160)}…` : h.text,
+        score: h.score,
       })),
+      instruction:
+        '已有检索结果。请立即根据 hits 给出最终中文回答，句末标注 [citation]，不要再次调用 search_notes。',
     },
     null,
     2,

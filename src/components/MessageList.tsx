@@ -3,6 +3,7 @@
  */
 import ReactMarkdown from 'react-markdown'
 import type { UiMessage } from '../types'
+import { CitationMarkdown } from './CitationMarkdown'
 import { ToolCard } from './ToolCard'
 import './MessageList.css'
 
@@ -37,9 +38,12 @@ export function MessageList({ messages }: { messages: UiMessage[] }) {
 
           {m.content ? (
             <div className="msg__content">
-              {/* 助手回复按 Markdown 渲染（列表、加粗等） */}
-              <ReactMarkdown>{m.content}</ReactMarkdown>
-              {/* 流式中加一个闪烁光标 */}
+              {m.role === 'assistant' ? (
+                /* 助手：解析 [1][2] 角标，数据来自同条消息里的 search_notes */
+                <CitationMarkdown content={m.content} tools={m.tools} />
+              ) : (
+                <ReactMarkdown>{m.content}</ReactMarkdown>
+              )}
               {m.status === 'streaming' && <span className="caret" />}
             </div>
           ) : (

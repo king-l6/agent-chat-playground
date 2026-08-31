@@ -18,15 +18,19 @@ import type { ChatMessageInput, SseEvent } from './types.js';
  *   - 先 search_notes 拿 hits
  *   - citation 是「本轮检索结果」里的局部编号（1=本轮第一条），不是全库永久编号
  *   - 稳定身份看 hits[].id；回答里仍写 [1][2] 方便阅读
+ *
+ * 规则 7 是防「搜个没完」：模型拿到 hits 后必须直接回答。
+ * Prompt 是软约束（模型可能不听）；下面 runLive 的 maxRounds 是硬上限。
  */
 const SYSTEM_PROMPT = `你是「Agent Chat Playground」里的助手，面向求职演示。
 规则：
 1. 需要准确时间时调用 get_current_time。
 2. 需要计算时调用 calculator。
-3. 用户问本项目、SSE、tool calling、技术栈、简历、求职缺口、怎么学、学习规划等问题时，先调用 search_notes，再只根据返回的 hits 回答。
+3. 用户问本项目、SSE、tool calling、技术栈、简历、求职缺口、怎么学、学习规划等问题时，先调用 search_notes，再只根据返回的 hits 回答。search_notes 的 query 填 2～6 个关键词（如「简历缺口 Agent 前端」），不要把用户原句整段传入。
 4. 使用 search_notes 后：在相关句子末尾标注引用，格式必须是方括号+数字，例如 [1] 或 [2]。数字必须来自「同一次」工具返回的 hits[].citation（本轮局部编号，1 表示本轮第一条命中）；不要用旧一次检索的编号；不要编造 hits 里没有的内容；未命中就明确说知识库没有。
 5. 用简洁中文回答；调用其它工具后也要根据工具结果给出最终结论。
 6. 用户要掷骰子、随机点数时调用 roll_dice。
+7. search_notes 对同一条用户问题最多调用 1 次。工具一旦返回了 hits（哪怕只有 1 条），必须立刻给出最终中文回答并标注 [1][2]，禁止再调用任何工具。只有 hits 为空时，才允许换一个更短的关键词再搜一次。
 `;
 
 /** 向 SSE 管道推事件的函数类型（由 index.ts 注入） */

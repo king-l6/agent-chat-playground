@@ -13,6 +13,7 @@
   border-radius: 14px;
   border: 1px solid #e5e7eb;
   background: #fff;
+  overflow: visible;
 }
 
 .msg--user {
@@ -33,6 +34,7 @@
   line-height: 1.65;
   color: #0f172a;
   font-size: 0.98rem;
+  overflow: visible;
 }
 
 .msg__content p {
