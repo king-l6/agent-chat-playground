@@ -9,10 +9,12 @@
     "dev:server": "tsx watch server/src/index.ts",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "eval:rag": "tsx server/src/eval.ts",
     "lint": "oxlint"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
+    "@xyflow/react": "^12.11.6",
     "axios": "^1.19.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",

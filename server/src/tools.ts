@@ -102,7 +102,7 @@ function safeCalculate(expression: string): string {
 
 /**
  * search_notes 工具的真正实现
- * 流程：retrieve（向量优先，否则关键词）→ JSON 给模型 / 前端卡片
+ * 流程：retrieve（hybrid + rerank + 邻接扩上下文）→ JSON 给模型 / 前端卡片
  */
 async function searchNotes(query: string): Promise<string> {
   const result = await retrieve(query, 3)
@@ -132,16 +132,21 @@ async function searchNotes(query: string): Promise<string> {
       query: result.query,
       query_used: result.query_used,
       rewrite_terms: result.rewrite_terms,
-      hits: hits.map((h) => ({
-        citation: h.citation,
-        id: h.id,
-        docId: h.docId,
-        title: h.title,
-        snippet: h.text.length > 160 ? `${h.text.slice(0, 160)}…` : h.text,
-        score: h.score,
-      })),
+      hits: hits.map((h) => {
+        const matched = h.text
+        const forModel = h.context ?? h.text
+        return {
+          citation: h.citation,
+          id: h.id,
+          docId: h.docId,
+          title: h.title,
+          snippet: matched.length > 200 ? `${matched.slice(0, 200)}…` : matched,
+          text: forModel.length > 900 ? `${forModel.slice(0, 900)}…` : forModel,
+          score: h.score,
+        }
+      }),
       instruction:
-        '已有检索结果。请立即根据 hits 给出最终中文回答，句末标注 [citation]，不要再次调用 search_notes。',
+        '已有检索结果。请立即根据 hits[].text 给出最终中文回答，句末标注 [citation]，不要再次调用 search_notes。text 可能含命中块的前后邻接，引用编号仍对应该条 id。',
     },
     null,
     2,

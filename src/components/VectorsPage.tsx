@@ -105,7 +105,7 @@ export function VectorsPage() {
     })
   }, [chunks, ns, filter])
 
-  const ready = rag?.retrieval === 'vector' && (rag.indexed ?? 0) > 0
+  const ready = (rag?.retrieval === 'hybrid' || rag?.retrieval === 'vector') && (rag.indexed ?? 0) > 0
   const dim = indexMeta.dim || rag?.dim || 0
   const model = indexMeta.model || rag?.embedding || '—'
 

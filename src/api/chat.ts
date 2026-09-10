@@ -169,9 +169,20 @@ export async function uploadKnowledge(file: File) {
 
 export async function deleteKnowledgeFile(docId: string) {
   const { data } = await axios.delete<{
-    ok: boolean;
-    rag: RagStatus;
-    documents: KnowledgeDoc[];
-  }>(`${API_BASE}/api/knowledge/docs/${encodeURIComponent(docId)}`);
-  return data;
+    ok: boolean
+    rag: RagStatus
+    documents: KnowledgeDoc[]
+  }>(`${API_BASE}/api/knowledge/docs/${encodeURIComponent(docId)}`)
+  return data
+}
+
+export async function runWorkflow(
+  question: string,
+  pipeline: Array<{ id: string; kind: 'search' | 'answer' | 'calc'; expression?: string }>,
+) {
+  const { data } = await axios.post<{
+    steps: Array<{ id: string; output: string }>
+    answer: string
+  }>(`${API_BASE}/api/workflow/run`, { question, pipeline })
+  return data
 }

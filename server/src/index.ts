@@ -10,12 +10,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import multer from 'multer'
 import { resolveLlmConfig, runAgentChat } from './agent.js'
+import { runWorkflow } from './workflow.js'
 import {
   UPLOAD_DIR,
   commitUpload,
   decodeMulterName,
   ensureDataDirs,
-  invalidateChunks,
   listDocuments,
   tempUploadFilename,
 } from './knowledge.js'
@@ -23,6 +23,7 @@ import {
   deleteUploadedFile,
   ensureIndex,
   getRagStatus,
+  ingestUploadedDoc,
   listIndexRows,
 } from './retrieve.js'
 import type { ChatMessageInput, SseEvent } from './types.js'
@@ -99,8 +100,7 @@ app.post('/api/knowledge/upload', upload.single('file'), async (req, res) => {
   }
   try {
     const rec = commitUpload(file.path, path.basename(original))
-    invalidateChunks()
-    await ensureIndex()
+    await ingestUploadedDoc(rec)
     res.json({
       ok: true,
       filename: rec.originalName,
@@ -120,6 +120,48 @@ app.delete('/api/knowledge/docs/:docId', async (req, res) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     res.status(404).json({ error: message })
+  }
+})
+
+/**
+ * POST /api/workflow/run
+ * body: { question, pipeline: [{ id, kind, expression? }] }
+ */
+app.post('/api/workflow/run', async (req, res) => {
+  const question = String(req.body?.question ?? '').trim()
+  if (!question) {
+    res.status(400).json({ error: 'question 不能为空' })
+    return
+  }
+  const raw = req.body?.pipeline
+  const pipeline = Array.isArray(raw)
+    ? raw
+        .map((item: unknown) => {
+          if (!item || typeof item !== 'object') return null
+          const rec = item as { id?: unknown; kind?: unknown; expression?: unknown }
+          const kind = rec.kind
+          if (kind !== 'search' && kind !== 'answer' && kind !== 'calc') return null
+          return {
+            id: String(rec.id ?? kind),
+            kind,
+            expression: rec.expression != null ? String(rec.expression) : undefined,
+          }
+        })
+        .filter((s): s is { id: string; kind: 'search' | 'answer' | 'calc'; expression?: string } => s != null)
+    : [
+        { id: 'search', kind: 'search' as const },
+        { id: 'answer', kind: 'answer' as const },
+      ]
+  if (pipeline.length === 0) {
+    res.status(400).json({ error: '请从「提问」连出至少一步' })
+    return
+  }
+  try {
+    const result = await runWorkflow(question, pipeline)
+    res.json(result)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
   }
 })
 

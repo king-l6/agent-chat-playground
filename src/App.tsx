@@ -9,6 +9,7 @@ import type { SseEvent, UiMessage } from './types';
 import { MessageList } from './components/MessageList';
 import { DocumentsPage } from './components/DocumentsPage';
 import { VectorsPage } from './components/VectorsPage';
+import { CanvasPage } from './components/CanvasPage';
 import './components/AppShell.css';
 
 /** 生成前端本地唯一 id（消息 id、助手气泡 id） */
@@ -16,8 +17,9 @@ function uid() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function pageFromHash(): 'chat' | 'documents' | 'vectors' {
+function pageFromHash(): 'chat' | 'documents' | 'vectors' | 'canvas' {
   const path = location.hash.replace(/^#\/?/, '').split('?')[0]
+  if (path.startsWith('canvas') || path.startsWith('workflow')) return 'canvas'
   if (path.startsWith('vectors')) return 'vectors'
   if (path.startsWith('documents') || path.startsWith('knowledge')) return 'documents'
   return 'chat'
@@ -34,7 +36,7 @@ export default function App() {
   const [mode, setMode] = useState<'live' | 'mock' | 'unknown'>('unknown');
   const [model, setModel] = useState<string>('');
   const [rag, setRag] = useState<RagStatus | null>(null);
-  const [page, setPage] = useState<'chat' | 'documents' | 'vectors'>(pageFromHash);
+  const [page, setPage] = useState<'chat' | 'documents' | 'vectors' | 'canvas'>(pageFromHash);
   /** 顶部/底部错误条 */
   const [error, setError] = useState<string>('');
   /** 当前请求的 AbortController，点停止时 abort */
@@ -227,7 +229,7 @@ export default function App() {
       <header className='topbar'>
         <div>
           <div className='brand'>Agent Chat Playground</div>
-          <div className='sub'>SSE 流式 · Tool Calling · 知识库 / 向量索引</div>
+          <div className='sub'>SSE · Tool Calling · RAG · 编排画布</div>
         </div>
         <div className="topbar__right">
           <nav className="nav">
@@ -246,6 +248,12 @@ export default function App() {
             >
               向量库
             </a>
+            <a
+              className={page === 'canvas' ? 'nav__link nav__link--on' : 'nav__link'}
+              href="#/canvas"
+            >
+              编排
+            </a>
           </nav>
           <div className={`badge badge--${mode}`}>
             {mode === 'live' && `LIVE${model ? ` · ${model}` : ''}`}
@@ -259,6 +267,8 @@ export default function App() {
         <DocumentsPage />
       ) : page === 'vectors' ? (
         <VectorsPage />
+      ) : page === 'canvas' ? (
+        <CanvasPage />
       ) : (
         <>
       <main className='main'>

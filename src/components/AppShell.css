@@ -79,6 +79,11 @@
   overflow: hidden;
 }
 
+.app--kb > .wf {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .nav {
   display: flex;
   gap: 0.25rem;

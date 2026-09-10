@@ -2,7 +2,8 @@
  * 迷你知识库（引用 RAG）
  *
  * 整条链路：
- *   读文档（内置 + 手册 + uploads）→ overlap 切块 →（retrieve.ts）embedding → TopK
+ *   启动：读全部文档切块并建索引
+ *   上传/删除：只切这一篇，按 chunk.id upsert / 按 docId 删向量，其它文档不动
  *   citation 在本轮 hits 里临时编成 1..K；跨文档定位靠 chunk.id
  *
  * 被谁调用：tools.ts 的 searchNotes → executeTool('search_notes')
@@ -32,6 +33,11 @@ export type SearchHit = KnowledgeChunk & {
   citation: number
   /** 本轮打分，方便工具卡片里对照「为什么留下 / 为什么当没中」 */
   score: number
+  /**
+   * 命中块左右邻接拼起来，给模型当上下文（small-to-big）。
+   * 没有邻接时就是 text 本身。评测仍看 text（命中块）。
+   */
+  context?: string
 }
 
 // ESM 模块没有 __dirname，用当前文件 URL 推算所在目录
@@ -48,7 +54,7 @@ export function ensureDataDirs() {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true })
 }
 
-type ManifestDoc = {
+export type ManifestDoc = {
   id: string
   /** 磁盘上的文件名，等于 {id}.md，避免中文/乱码当路径 */
   storedAs: string
@@ -175,11 +181,28 @@ export function deleteUploadByDocId(docId: string): void {
   writeManifest({ docs: file.docs.filter((d) => d.id !== docId) })
 }
 
-/** 丢掉内存切块缓存，上传/删除后必须调，否则还在用旧文档 */
+/**
+ * 进程内切块列表。启动时全量 load；之后上传/删除只改这一篇，不再 invalidate 整袋。
+ */
 let cached: KnowledgeChunk[] | null = null
 
-export function invalidateChunks() {
-  cached = null
+/** 只切磁盘上这一篇（不扫其它文档） */
+export function chunkOnDiskDoc(rec: ManifestDoc): KnowledgeChunk[] {
+  const full = path.join(UPLOAD_DIR, rec.storedAs)
+  if (!fs.existsSync(full)) return []
+  const raw = fs.readFileSync(full, 'utf8')
+  return chunkMarkdown(rec.id, raw, rec.originalName)
+}
+
+/** 缓存已热时原地替换该文档的块；还没 load 则不动，下次 getChunks 会从盘读到 */
+export function replaceDocChunks(docId: string, chunks: KnowledgeChunk[]): void {
+  if (!cached) return
+  cached = cached.filter((c) => c.docId !== docId).concat(chunks)
+}
+
+export function removeDocChunks(docId: string): void {
+  if (!cached) return
+  cached = cached.filter((c) => c.docId !== docId)
 }
 
 /**
@@ -237,17 +260,17 @@ export function listDocuments(): KnowledgeDoc[] {
   return Array.from(map.values())
 }
 
-/** 单块最大字符数，太长就再切一刀 */
-const MAX_CHUNK_CHARS = 280
-/** 相邻块重叠字数：避免一句被切两半后两边都检索不到完整语义 */
-const CHUNK_OVERLAP = 60
+/** 单块最大字符数；评测脚本会改，线上默认 280 */
+let chunkMaxChars = 280
+/** 相邻块重叠字数；评测脚本会改，线上默认 60 */
+let chunkOverlap = 60
 /** 太短的块丢掉，避免空片段污染检索 */
 const MIN_CHUNK_CHARS = 20
 /**
  * 低于这个分当「没中」，返回空 hits，模型才被允许再搜一次。
  * 和「score > 0 就算命中」的差别：弱匹配（正文里碰巧出现一个词 +2）不再锁死答案。
  *
- * 对照打分：整句 +10 必过；标题词 +4 且正文同词 +2 = 6 刚过；只中正文一词 +2 不过。
+ * 对照打分：整句 +10 必过；标题词 +6 必过；标题 +6 且正文同词 +2 更高；只中正文一词 +2 不过。
  */
 const MIN_HIT_SCORE = 6
 
@@ -358,14 +381,14 @@ function splitOversized(
   text: string,
   title: string,
 ): Array<{ title: string; text: string }> {
-  if (text.length <= MAX_CHUNK_CHARS) return [{ title, text }]
+  if (text.length <= chunkMaxChars) return [{ title, text }]
 
   const parts: Array<{ title: string; text: string }> = []
-  const step = MAX_CHUNK_CHARS - CHUNK_OVERLAP
+  const step = chunkMaxChars - chunkOverlap
   for (let i = 0; i < text.length; i += step) {
-    const slice = text.slice(i, i + MAX_CHUNK_CHARS).trim()
+    const slice = text.slice(i, i + chunkMaxChars).trim()
     if (slice.length >= MIN_CHUNK_CHARS) parts.push({ title, text: slice })
-    if (i + MAX_CHUNK_CHARS >= text.length) break
+    if (i + chunkMaxChars >= text.length) break
   }
   return parts
 }
@@ -442,10 +465,42 @@ function loadAllChunks(): KnowledgeChunk[] {
   return chunks
 }
 
-/** 拿到全部 chunk（懒加载 + 缓存；invalidateChunks 之后会重新 load） */
+/** 评测用：只切内置说明 + 手册，不掺用户上传（否则黄金集随你传的文件飘） */
+export function loadCoreChunks(): KnowledgeChunk[] {
+  const chunks: KnowledgeChunk[] = []
+  for (const doc of BUILTIN_DOCS) {
+    chunks.push(...chunkMarkdown(doc.docId, doc.body, doc.title))
+  }
+  const handbookPath = path.join(ROOT, '求职补充手册.md')
+  try {
+    const raw = fs.readFileSync(handbookPath, 'utf8')
+    chunks.push(...chunkMarkdown('handbook', raw, '求职补充手册'))
+  } catch (err) {
+    console.warn('[knowledge] 读取求职补充手册.md 失败:', err)
+  }
+  return chunks
+}
+
+/** 拿到全部 chunk（懒加载；启动后靠 replace/removeDocChunks 增量维护） */
 export function getChunks(): KnowledgeChunk[] {
   if (!cached) cached = loadAllChunks()
   return cached
+}
+
+export function getChunkParams() {
+  return { maxChars: chunkMaxChars, overlap: chunkOverlap }
+}
+
+/**
+ * 评测换窗口时调用：丢掉切块缓存，下次 getChunks 按新参数重切。
+ * 不碰磁盘上的 index.json；重建向量由调用方决定。
+ */
+export function configureChunking(maxChars: number, overlap: number) {
+  if (maxChars < 40) throw new Error('块长太小')
+  if (overlap < 0 || overlap >= maxChars) throw new Error('overlap 必须 ≥0 且小于块长')
+  chunkMaxChars = maxChars
+  chunkOverlap = overlap
+  cached = null
 }
 
 /**
@@ -453,7 +508,7 @@ export function getChunks(): KnowledgeChunk[] {
  *
  * 打分规则（可调）：
  *   - 整句 query 命中 title/text → +10
- *   - 每个 token（≥2 字）命中 title → +4，命中 text → +2
+ *   - 每个 token（≥2 字）命中 title → +6，命中 text → +2
  *   - score >= MIN_HIT_SCORE 才算命中（弱匹配当没中，允许再搜）
  *   - 对本轮结果临时 citation = 1..K（局部编号）
  *
@@ -464,7 +519,12 @@ export function getChunks(): KnowledgeChunk[] {
  * @param query 用户问题或模型传入的检索词
  * @param topK  最多返回几条，默认 3
  */
-export function searchChunks(query: string, topK = 3): SearchHit[] {
+export function searchChunks(
+  query: string,
+  topK = 3,
+  pool?: KnowledgeChunk[],
+  minScore = MIN_HIT_SCORE,
+): SearchHit[] {
   const q = query.toLowerCase().trim()
   if (!q) return []
 
@@ -474,7 +534,7 @@ export function searchChunks(query: string, topK = 3): SearchHit[] {
     .map((t) => t.trim())
     .filter((t) => t.length >= 1)
 
-  const scored = getChunks()
+  const scored = (pool ?? getChunks())
     .map((chunk) => {
       const title = chunk.title.toLowerCase()
       const text = chunk.text.toLowerCase()
@@ -486,13 +546,13 @@ export function searchChunks(query: string, topK = 3): SearchHit[] {
       // 分词匹配：标题命中比正文命中分更高
       for (const token of tokens) {
         if (token.length < 2) continue
-        if (title.includes(token)) score += 4
+        if (title.includes(token)) score += 6
         if (text.includes(token)) score += 2
       }
 
       return { chunk, score }
     })
-    .filter((x) => x.score >= MIN_HIT_SCORE)
+    .filter((x) => x.score >= minScore)
     .sort((a, b) => b.score - a.score) // 分数从高到低
 
   // 本轮局部编号：第 1 名 → [1]，第 2 名 → [2]…
