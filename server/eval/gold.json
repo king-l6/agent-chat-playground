@@ -1,0 +1,54 @@
+{
+  "topK": 3,
+  "notes": "黄金集标的是「哪篇文档 + 片段里应出现的字」，不标 chunk.id。切块大小一变，c12 就不再是同一段。",
+  "cases": [
+    {
+      "id": "stack",
+      "query": "agent-chat-playground 的技术栈是什么？",
+      "docId": "project",
+      "contains": "Express"
+    },
+    {
+      "id": "sse",
+      "query": "text/event-stream 会推哪些事件？",
+      "docId": "project",
+      "contains": "event-stream"
+    },
+    {
+      "id": "tools",
+      "query": "tool calling 之后服务端做什么？",
+      "docId": "project",
+      "contains": "tool_calls"
+    },
+    {
+      "id": "mock",
+      "query": "无 Key 时走 mock 还是直接报错？",
+      "docId": "project",
+      "contains": "mock"
+    },
+    {
+      "id": "gap",
+      "query": "我投 Agent 前端缺什么？",
+      "docId": "handbook",
+      "contains": "SSE"
+    },
+    {
+      "id": "market",
+      "query": "上海 Agent 前端岗最看重什么技术？",
+      "docId": "handbook",
+      "contains": "React"
+    },
+    {
+      "id": "week3",
+      "query": "Week 3 知识库要做成什么样？",
+      "docId": "handbook",
+      "contains": "引用"
+    },
+    {
+      "id": "learn",
+      "query": "每天优先学的第一项是流式还是画布？",
+      "docId": "handbook",
+      "contains": "SSE 流式前端"
+    }
+  ]
+}

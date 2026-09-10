@@ -1,11 +1,20 @@
+/**
+ * 本地工具定义 + 执行
+ * - toolDefinitions：告诉模型「有哪些工具、参数长什么样」（OpenAI tools schema）
+ * - executeTool：服务端真正跑工具，返回 JSON 字符串
+ */
 import type { ChatCompletionTool } from 'openai/resources/chat/completions'
+// 引用 RAG：retrieve.ts 负责向量/关键词，这里只做工具入口 + JSON
+import { retrieve } from './retrieve.js'
 
+/** 交给大模型的工具清单（function calling schema） */
 export const toolDefinitions: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
       name: 'get_current_time',
-      description: '获取当前日期与时间（上海时区）。当用户询问现在几点、今天日期时调用。',
+      description:
+        '获取当前日期与时间（上海时区）。当用户询问现在几点、今天日期时调用。',
       parameters: {
         type: 'object',
         properties: {},
@@ -36,13 +45,14 @@ export const toolDefinitions: ChatCompletionTool[] = [
     function: {
       name: 'search_notes',
       description:
-        '在本地演示知识库中检索笔记片段（模拟 RAG）。当用户问项目、简历、Agent、SSE 等相关问题时调用。',
+        '在本地知识库中检索文档片段（内置说明、求职手册、用户上传的 md/txt）。当用户问项目、SSE、简历缺口、上传文档内容、怎么学等问题时调用。query 可以是原句或关键词。',
       parameters: {
         type: 'object',
         properties: {
           query: {
             type: 'string',
-            description: '检索关键词或问题',
+            description:
+              '检索词或原句。向量检索可直接传用户问题；关键词回退时服务端会改写。',
           },
         },
         required: ['query'],
@@ -50,94 +60,141 @@ export const toolDefinitions: ChatCompletionTool[] = [
       },
     },
   },
-]
+  {
+    type: 'function',
+    function: {
+      name: 'roll_dice',
+      description: '掷骰子。用户说掷骰子、随机点数、roll dice 时调用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          sides: {
+            type: 'number',
+            description: '骰子面数，默认 6',
+          },
+          count: {
+            type: 'number',
+            description: '掷几次，默认 1，最多 10',
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+];
 
-const DEMO_NOTES: Array<{ id: string; title: string; text: string }> = [
-  {
-    id: '1',
-    title: '项目目标',
-    text: 'agent-chat-playground 是一个可演示的 AI Agent 前端作品：流式 Chat（SSE）+ tool calling 卡片 + 简易检索。',
-  },
-  {
-    id: '2',
-    title: '技术栈',
-    text: '前端 React + TypeScript + Vite；后端 Express + OpenAI 兼容 API；支持 DeepSeek / OpenAI。无 Key 时可走 mock 模式。',
-  },
-  {
-    id: '3',
-    title: 'SSE',
-    text: '服务端用 text/event-stream 推送 text_delta、tool_start、tool_result 等事件；前端 ReadableStream 边收边渲染。',
-  },
-  {
-    id: '4',
-    title: 'Tool calling',
-    text: '模型返回 tool_calls 后，服务端执行本地工具，把结果写回 messages，再继续向模型要最终回答，UI 用卡片展示调用过程。',
-  },
-]
-
+/**
+ * 安全一点的四则运算：先白名单校验字符，再用 Function 求值
+ * （演示用；生产应换更严的表达式解析器）
+ */
 function safeCalculate(expression: string): string {
-  const normalized = expression.replace(/\s+/g, '')
+  const normalized = expression.replace(/\s+/g, '');
   if (!/^[\d+\-*/().]+$/.test(normalized)) {
-    throw new Error('表达式含有非法字符，仅允许数字和 + - * / ( )')
+    throw new Error('表达式含有非法字符，仅允许数字和 + - * / ( )');
   }
   // eslint-disable-next-line no-new-func
-  const value = Function(`"use strict"; return (${normalized})`)()
+  const value = Function(`"use strict"; return (${normalized})`)();
   if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new Error('计算结果无效')
+    throw new Error('计算结果无效');
   }
-  return String(value)
+  return String(value);
 }
 
-function searchNotes(query: string): string {
-  const q = query.toLowerCase()
-  const hits = DEMO_NOTES.filter(
-    (note) =>
-      note.title.toLowerCase().includes(q) ||
-      note.text.toLowerCase().includes(q) ||
-      q.split(/\s+/).some((token) => token && note.text.toLowerCase().includes(token)),
-  ).slice(0, 3)
+/**
+ * search_notes 工具的真正实现
+ * 流程：retrieve（hybrid + rerank + 邻接扩上下文）→ JSON 给模型 / 前端卡片
+ */
+async function searchNotes(query: string): Promise<string> {
+  const result = await retrieve(query, 3)
+  const { hits, mode } = result
 
   if (hits.length === 0) {
-    return JSON.stringify({ hits: [], message: '知识库未命中，请换个关键词试试。' }, null, 2)
+    return JSON.stringify(
+      {
+        hits: [],
+        retrieval: mode,
+        query: result.query,
+        query_used: result.query_used,
+        rewrite_terms: result.rewrite_terms,
+        message:
+          '知识库未命中或相关度过低。请换更短、更具体的关键词（例如「简历缺口」而不是整句问题）。',
+        instruction:
+          '未命中。可以换一个更短的中文关键词再搜一次；仍没有则明确说知识库没有，不要继续搜。',
+      },
+      null,
+      2,
+    )
   }
 
   return JSON.stringify(
     {
-      hits: hits.map((h) => ({ id: h.id, title: h.title, snippet: h.text })),
+      retrieval: mode,
+      query: result.query,
+      query_used: result.query_used,
+      rewrite_terms: result.rewrite_terms,
+      hits: hits.map((h) => {
+        const matched = h.text
+        const forModel = h.context ?? h.text
+        return {
+          citation: h.citation,
+          id: h.id,
+          docId: h.docId,
+          title: h.title,
+          snippet: matched.length > 200 ? `${matched.slice(0, 200)}…` : matched,
+          text: forModel.length > 900 ? `${forModel.slice(0, 900)}…` : forModel,
+          score: h.score,
+        }
+      }),
+      instruction:
+        '已有检索结果。请立即根据 hits[].text 给出最终中文回答，句末标注 [citation]，不要再次调用 search_notes。text 可能含命中块的前后邻接，引用编号仍对应该条 id。',
     },
     null,
     2,
   )
 }
 
+/**
+ * 按工具名分发执行
+ * @param name    工具名（来自模型 tool_calls）
+ * @param rawArgs 参数 JSON 字符串
+ * @returns       给模型 / 前端看的结果字符串（一般是 JSON）
+ */
 export async function executeTool(
   name: string,
   rawArgs: string,
 ): Promise<string> {
-  let args: Record<string, unknown> = {}
+  let args: Record<string, unknown> = {};
   try {
-    args = rawArgs ? (JSON.parse(rawArgs) as Record<string, unknown>) : {}
+    args = rawArgs ? (JSON.parse(rawArgs) as Record<string, unknown>) : {};
   } catch {
-    throw new Error(`无法解析工具参数: ${rawArgs}`)
+    throw new Error(`无法解析工具参数: ${rawArgs}`);
   }
 
   switch (name) {
     case 'get_current_time': {
-      const now = new Date()
-      const text = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-      return JSON.stringify({ timezone: 'Asia/Shanghai', now: text })
+      const now = new Date();
+      const text = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+      return JSON.stringify({ timezone: 'Asia/Shanghai', now: text });
     }
     case 'calculator': {
-      const expression = String(args.expression ?? '')
-      if (!expression) throw new Error('缺少 expression')
-      return JSON.stringify({ expression, result: safeCalculate(expression) })
+      const expression = String(args.expression ?? '');
+      if (!expression) throw new Error('缺少 expression');
+      return JSON.stringify({ expression, result: safeCalculate(expression) });
     }
     case 'search_notes': {
-      const query = String(args.query ?? '')
-      if (!query) throw new Error('缺少 query')
-      return searchNotes(query)
+      const query = String(args.query ?? '');
+      if (!query) throw new Error('缺少 query');
+      return await searchNotes(query);
+    }
+
+    case 'roll_dice': {
+      const sides = Math.min(Math.max(Number(args.sides ?? 6), 2), 100)
+      const count = Math.min(Math.max(Number(args.count ?? 1), 1), 10)
+      if (count > 10) throw new Error('掷骰子次数不能超过 10');
+      const result = Math.floor(Math.random() * sides) + 1;
+      return JSON.stringify({ sides, count, result });
     }
     default:
-      throw new Error(`未知工具: ${name}`)
+      throw new Error(`未知工具: ${name}`);
   }
 }

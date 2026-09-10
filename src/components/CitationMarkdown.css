@@ -1,0 +1,77 @@
+.cite-wrap {
+  position: relative;
+  display: inline;
+  vertical-align: baseline;
+}
+
+.cite-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.4rem;
+  margin: 0 1px;
+  padding: 0 0.25rem;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.35;
+  cursor: pointer;
+  vertical-align: super;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.cite-badge--ok {
+  color: #1d4ed8;
+  background: #dbeafe;
+}
+
+.cite-badge--ok:hover {
+  background: #bfdbfe;
+}
+
+.cite-badge--miss {
+  color: #94a3b8;
+  background: #f1f5f9;
+}
+
+.cite-popover {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  top: calc(100% + 6px);
+  width: min(320px, 80vw);
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: #334155;
+  text-align: left;
+  white-space: normal;
+}
+
+.cite-popover strong {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: #0f172a;
+  font-size: 0.88rem;
+}
+
+.cite-popover__meta {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  color: #64748b;
+}
+
+.cite-popover__snippet {
+  margin: 0;
+}
+
+.cite-popover--miss {
+  color: #64748b;
+}
