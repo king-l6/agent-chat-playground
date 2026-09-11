@@ -51,7 +51,7 @@ async function getExtractor(): Promise<FeaturePipe> {
   // 国内直连 huggingface.co 经常 fetch failed；可用 HF_ENDPOINT 覆盖
   env.remoteHost = process.env.HF_ENDPOINT?.trim() || 'https://hf-mirror.com/'
 
-  console.log(
+  console.error(
     `[embed] 加载 ${EMBEDDING_MODEL} host=${env.remoteHost}（首次会下载 ONNX，之后走缓存）`,
   )
   extractor = (await pipeline(

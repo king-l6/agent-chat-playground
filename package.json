@@ -11,6 +11,7 @@
     "start": "tsx server/src/index.ts",
     "preview": "vite preview",
     "eval:rag": "tsx server/src/eval.ts",
+    "eval:rag:py": "python3 scripts/eval_retrieve.py",
     "lint": "oxlint"
   },
   "dependencies": {
