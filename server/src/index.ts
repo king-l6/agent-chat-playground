@@ -31,19 +31,18 @@ import type { ChatMessageInput, SseEvent } from './types.js'
 // ESM 下没有 __dirname，用当前模块 URL 推出来
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // 加载仓库根目录 .env；override:true 避免被 shell 里旧 OPENAI_* 盖掉
+const portFromShell = process.env.PORT
 dotenv.config({ path: path.resolve(__dirname, '../../.env'), override: true })
 
 const app = express()
-const PORT = Number(process.env.PORT || 8790)
+const PORT = Number(portFromShell || process.env.PORT || 8790)
 
-// 允许前端跨域（开发时 Vite 5176 → 后端 8790）
 app.use(
   cors({
     origin: true,
     methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   }),
 )
-// 解析 JSON body，限制 1MB
 app.use(express.json({ limit: '1mb' }))
 
 ensureDataDirs()
@@ -218,10 +217,27 @@ app.post('/api/chat', async (req, res) => {
   }
 })
 
-app.listen(PORT, () => {
+const distDir = path.resolve(__dirname, '../../dist')
+const indexHtml = path.join(distDir, 'index.html')
+if (fs.existsSync(indexHtml)) {
+  app.use(express.static(distDir))
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      next()
+      return
+    }
+    if (req.path.startsWith('/api')) {
+      next()
+      return
+    }
+    res.sendFile(indexHtml)
+  })
+}
+
+app.listen(PORT, '0.0.0.0', () => {
   const { apiKey, model } = resolveLlmConfig()
   const mode = apiKey ? 'live' : 'mock'
-  console.log(`[agent-chat] http://127.0.0.1:${PORT}  mode=${mode}  model=${model}`)
+  console.log(`[agent-chat] http://0.0.0.0:${PORT}  mode=${mode}  model=${model}`)
   void ensureIndex().catch((err) => {
     console.warn('[rag] 启动索引失败，先走关键词:', err)
   })

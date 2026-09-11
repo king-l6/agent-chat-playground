@@ -8,6 +8,7 @@
     "dev:web": "vite",
     "dev:server": "tsx watch server/src/index.ts",
     "build": "tsc -b && vite build",
+    "start": "tsx server/src/index.ts",
     "preview": "vite preview",
     "eval:rag": "tsx server/src/eval.ts",
     "lint": "oxlint"
@@ -24,6 +25,7 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
+    "tsx": "^4.23.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -36,7 +38,6 @@
     "@vitejs/plugin-react": "^6.0.4",
     "concurrently": "^10.0.4",
     "oxlint": "^1.75.0",
-    "tsx": "^4.23.5",
     "typescript": "~6.0.2",
     "vite": "^8.2.0"
   }
