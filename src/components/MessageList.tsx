@@ -14,11 +14,11 @@ export function MessageList({ messages }: { messages: UiMessage[] }) {
     return (
       <div className="empty">
         <h2>Agent Chat Playground</h2>
-        <p>流式对话 + Tool Calling 卡片。无 API Key 也能用 mock 模式演示。</p>
+        <p>流式对话 + 工具卡片 + 已连接 Skill。无 API Key 也能用 mock 演示。</p>
         <ul>
-          <li>现在几点了？</li>
-          <li>帮我算 123 * 456</li>
-          <li>这个项目的技术栈是什么？</li>
+          <li>现在几点了？（只调工具）</li>
+          <li>这个项目的技术栈是什么？（只检索）</li>
+          <li>请按面试口径介绍这个项目（先 load skill 再检索）</li>
         </ul>
       </div>
     )

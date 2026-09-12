@@ -133,12 +133,18 @@ export type IndexRow = {
   vectorHead: number[]
 }
 
+export type SkillMeta = {
+  name: string
+  description: string
+}
+
 export async function fetchHealth() {
   const { data } = await axios.get<{
     ok: boolean
     mode: string
     model?: string
     rag?: RagStatus
+    skills?: SkillMeta[]
   }>(`${API_BASE}/api/health`);
   return data;
 }

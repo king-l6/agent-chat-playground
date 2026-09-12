@@ -4,15 +4,34 @@
 import type { ToolCallView } from '../types'
 import './ToolCard.css'
 
+function isSkillTool(name: string) {
+  return name === 'load_skill'
+}
+
+function skillNameFromArgs(raw: string) {
+  try {
+    const name = (JSON.parse(raw) as { name?: unknown }).name
+    return typeof name === 'string' ? name : ''
+  } catch {
+    return ''
+  }
+}
+
 /** 根据 tool.status 换样式：running / done / error */
 export function ToolCard({ tool }: { tool: ToolCallView }) {
+  const skill = isSkillTool(tool.name)
+  const skillName = skill ? skillNameFromArgs(tool.arguments) : ''
   return (
-    <div className={`tool-card tool-card--${tool.status}`}>
+    <div
+      className={`tool-card tool-card--${tool.status}${skill ? ' tool-card--skill' : ''}`}
+    >
       <div className="tool-card__head">
-        <span className="tool-card__name">{tool.name}</span>
+        <span className="tool-card__name">
+          {skill ? `skill${skillName ? `:${skillName}` : ''}` : tool.name}
+        </span>
         <span className="tool-card__status">
-          {tool.status === 'running' && '调用中…'}
-          {tool.status === 'done' && '完成'}
+          {tool.status === 'running' && (skill ? '加载中…' : '调用中…')}
+          {tool.status === 'done' && (skill ? '已加载' : '完成')}
           {tool.status === 'error' && '失败'}
         </span>
       </div>
