@@ -6,6 +6,7 @@
 import type { ChatCompletionTool } from 'openai/resources/chat/completions'
 // 引用 RAG：retrieve.ts 负责向量/关键词，这里只做工具入口 + JSON
 import { retrieve } from './retrieve.js'
+import { readSkill } from './skills.js'
 
 /** 交给大模型的工具清单（function calling schema） */
 export const toolDefinitions: ChatCompletionTool[] = [
@@ -56,6 +57,25 @@ export const toolDefinitions: ChatCompletionTool[] = [
           },
         },
         required: ['query'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'load_skill',
+      description:
+        '读取一个已安装 Skill 的完整步骤（SKILL.md 正文）。当用户任务匹配某个 skill 的 description 时必须先调用，再按正文执行。name 必须是已安装 skill 的 id，例如 job-interview。同一 skill 每轮只调用一次。问时间、算术、掷骰子不要调用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Skill id，必须与已安装 skill 的 name 完全一致',
+          },
+        },
+        required: ['name'],
         additionalProperties: false,
       },
     },
@@ -185,6 +205,23 @@ export async function executeTool(
       const query = String(args.query ?? '');
       if (!query) throw new Error('缺少 query');
       return await searchNotes(query);
+    }
+
+    case 'load_skill': {
+      const skillName = String(args.name ?? '').trim()
+      if (!skillName) throw new Error('缺少 name')
+      const skill = readSkill(skillName)
+      return JSON.stringify(
+        {
+          name: skill.name,
+          description: skill.description,
+          body: skill.body,
+          instruction:
+            'Skill 已加载。按 body 逐步执行。需要知识库时再 search_notes。不要再 load 同一个 name。',
+        },
+        null,
+        2,
+      )
     }
 
     case 'roll_dice': {

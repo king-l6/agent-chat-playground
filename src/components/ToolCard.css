@@ -22,6 +22,20 @@
   border-left-color: #10b981;
 }
 
+.tool-card--skill {
+  border-left-color: #7c3aed;
+  background: #f5f3ff;
+}
+
+.tool-card--skill.tool-card--running {
+  border-left-color: #a78bfa;
+  background: #f5f3ff;
+}
+
+.tool-card--skill.tool-card--done {
+  border-left-color: #7c3aed;
+}
+
 .tool-card__head {
   display: flex;
   justify-content: space-between;

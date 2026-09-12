@@ -4,7 +4,7 @@
  * - 调 streamChat，把 SSE 事件落到某一条助手消息上
  */
 import { useEffect, useRef, useState } from 'react';
-import { streamChat, toApiMessages, fetchHealth, type RagStatus } from './api/chat';
+import { streamChat, toApiMessages, fetchHealth, type RagStatus, type SkillMeta } from './api/chat';
 import type { SseEvent, UiMessage } from './types';
 import { MessageList } from './components/MessageList';
 import { DocumentsPage } from './components/DocumentsPage';
@@ -36,6 +36,7 @@ export default function App() {
   const [mode, setMode] = useState<'live' | 'mock' | 'unknown'>('unknown');
   const [model, setModel] = useState<string>('');
   const [rag, setRag] = useState<RagStatus | null>(null);
+  const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [page, setPage] = useState<'chat' | 'documents' | 'vectors' | 'canvas'>(pageFromHash);
   /** 顶部/底部错误条 */
   const [error, setError] = useState<string>('');
@@ -57,6 +58,7 @@ export default function App() {
         setMode(data.mode === 'live' ? 'live' : 'mock');
         setModel(data.model || '');
         if (data.rag) setRag(data.rag);
+        if (data.skills) setSkills(data.skills);
       })
       .catch(() => setMode('unknown'));
   }, []);
@@ -229,7 +231,7 @@ export default function App() {
       <header className='topbar'>
         <div>
           <div className='brand'>Agent Chat Playground</div>
-          <div className='sub'>SSE · Tool Calling · RAG · 编排画布</div>
+          <div className='sub'>SSE · Tool · Skill · RAG · 编排画布</div>
         </div>
         <div className="topbar__right">
           <nav className="nav">
@@ -272,12 +274,17 @@ export default function App() {
       ) : (
         <>
       <main className='main'>
-        {rag && (
+        {(rag || skills.length > 0) && (
           <p className="rag-hint">
-            <a href="#/vectors">
-              检索 {rag.retrieval} · {rag.indexed}/{rag.chunks} 已编码 · {rag.docs} 篇
-            </a>
-            {rag.embedError ? ` · embed失败将走关键词` : ''}
+            {rag && (
+              <a href="#/vectors">
+                检索 {rag.retrieval} · {rag.indexed}/{rag.chunks} 已编码 · {rag.docs} 篇
+              </a>
+            )}
+            {rag?.embedError ? ` · embed失败将走关键词` : ''}
+            {skills.length > 0
+              ? `${rag ? ' · ' : ''}已连接 skill：${skills.map((s) => s.name).join(', ')}`
+              : ''}
           </p>
         )}
         <MessageList messages={messages} />
@@ -290,7 +297,7 @@ export default function App() {
 
         {/* 一键示例问题 */}
         <div className='hints'>
-          {['现在几点了？', '帮我算 123*456', '这个项目技术栈是什么？', '我的短板在哪？'].map(
+          {['现在几点了？', '帮我算 123*456', '这个项目技术栈是什么？', '请按面试口径介绍这个项目'].map(
             (q) => (
               <button
                 key={q}

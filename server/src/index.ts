@@ -10,6 +10,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import multer from 'multer'
 import { resolveLlmConfig, runAgentChat } from './agent.js'
+import { listSkills } from './skills.js'
 import { runWorkflow } from './workflow.js'
 import {
   UPLOAD_DIR,
@@ -66,6 +67,7 @@ app.get('/api/health', (_req, res) => {
     mode: apiKey ? 'live' : 'mock',
     model,
     rag: getRagStatus(),
+    skills: listSkills(),
   })
 })
 

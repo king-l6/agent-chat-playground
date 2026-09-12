@@ -8,6 +8,7 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
 } from 'openai/resources/chat/completions';
+import { skillsCatalogText } from './skills.js';
 import { executeTool, toolDefinitions } from './tools.js';
 import type { ChatMessageInput, SseEvent } from './types.js';
 
@@ -20,18 +21,24 @@ import type { ChatMessageInput, SseEvent } from './types.js';
  *   - 稳定身份看 hits[].id；回答里仍写 [1][2] 方便阅读
  *
  * 规则 7 是防「搜个没完」：模型拿到 hits 后必须直接回答。
+ * 规则 8 是 Skill：system 里只放目录，正文靠 load_skill。
  * Prompt 是软约束（模型可能不听）；下面 runLive 的 maxRounds 是硬上限。
  */
-const SYSTEM_PROMPT = `你是「Agent Chat Playground」里的助手，面向求职演示。
+function buildSystemPrompt() {
+  return `你是「Agent Chat Playground」里的助手，面向求职演示。
 规则：
 1. 需要准确时间时调用 get_current_time。
 2. 需要计算时调用 calculator。
-3. 用户问本项目、SSE、tool calling、技术栈、简历、求职缺口、怎么学、学习规划、或上传文档里的内容时，先调用 search_notes，再只根据返回的 hits 回答。search_notes 的 query 可以是用户原句或 2～6 个关键词。
+3. 用户问本项目、SSE、tool calling、技术栈、怎么学、学习规划、或上传文档里的内容时，先调用 search_notes，再只根据返回的 hits 回答。search_notes 的 query 可以是用户原句或 2～6 个关键词。
 4. 使用 search_notes 后：在相关句子末尾标注引用，格式必须是方括号+数字，例如 [1] 或 [2]。数字必须来自「同一次」工具返回的 hits[].citation（本轮局部编号，1 表示本轮第一条命中）；不要用旧一次检索的编号；不要编造 hits 里没有的内容；未命中就明确说知识库没有。
 5. 用简洁中文回答；调用其它工具后也要根据工具结果给出最终结论。
 6. 用户要掷骰子、随机点数时调用 roll_dice。
 7. search_notes 对同一条用户问题最多调用 1 次。工具一旦返回了 hits（哪怕只有 1 条），必须立刻给出最终中文回答并标注 [1][2]，禁止再调用任何工具。只有 hits 为空时，才允许换一个更短的关键词再搜一次。
+8. Skill 是说明书，不是函数。已安装 Skill：
+${skillsCatalogText()}
+用户任务匹配某条 description 时，先 load_skill(name)，再按返回的 body 执行。同一 skill 每轮最多一次。若 history 里已经有该 skill 的 load_skill 结果，直接按 body 执行，不要再 load。问时间、算术、掷骰子不要 load_skill。
 `;
+}
 
 /** 向 SSE 管道推事件的函数类型（由 index.ts 注入） */
 type Send = (event: SseEvent) => void;
@@ -39,6 +46,44 @@ type Send = (event: SseEvent) => void;
 /** Promise 版延时，mock 流式用 */
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function matchesInterviewSkill(text: string) {
+  return /自我介绍|面试口径|按面试|短板|缺口|怎么讲|口述|简历怎么/.test(text);
+}
+
+/**
+ * 运行时先把匹配到的 skill 注入 history，并推卡片。
+ * 这才是「已经在连」：不是等模型想起 load_skill。
+ */
+async function preloadMatchedSkills(
+  lastUser: string,
+  history: ChatCompletionMessageParam[],
+  send: Send,
+) {
+  if (!matchesInterviewSkill(lastUser)) return;
+  const args = JSON.stringify({ name: 'job-interview' });
+  const id = 'skill_job-interview';
+  send({ type: 'tool_start', id, name: 'load_skill', arguments: args });
+  try {
+    const result = await executeTool('load_skill', args);
+    send({ type: 'tool_result', id, name: 'load_skill', result });
+    history.push({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id,
+          type: 'function',
+          function: { name: 'load_skill', arguments: args },
+        },
+      ],
+    });
+    history.push({ role: 'tool', tool_call_id: id, content: result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    send({ type: 'tool_error', id, name: 'load_skill', error: message });
+  }
 }
 
 /**
@@ -54,6 +99,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
 
   const wantsTime = /几点|时间|日期|now|time/.test(lower);
   const wantsCalc = /算|计算|\d+\s*[\+\-\*\/]/.test(lower);
+  const wantsInterviewSkill = matchesInterviewSkill(last);
   const wantsSearch = /项目|sse|tool|agent|技术栈|简历|rag|知识库/.test(lower);
 
   /** 把整段回答拆成小块推 text_delta，模拟打字机 */
@@ -100,6 +146,36 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
       send({ type: 'tool_error', id, name: 'calculator', error: message });
       await streamText(`（mock）计算失败：${message}`);
     }
+    send({ type: 'done' });
+    return;
+  }
+
+  // —— Skill：先加载说明书，再按正文去检索 ——
+  if (wantsInterviewSkill) {
+    const skillId = 'mock_skill_1';
+    const skillArgs = JSON.stringify({ name: 'job-interview' });
+    send({ type: 'tool_start', id: skillId, name: 'load_skill', arguments: skillArgs });
+    await sleep(180);
+    const skillResult = await executeTool('load_skill', skillArgs);
+    send({ type: 'tool_result', id: skillId, name: 'load_skill', result: skillResult });
+
+    const searchId = 'mock_search_1';
+    const searchArgs = JSON.stringify({ query: last });
+    send({ type: 'tool_start', id: searchId, name: 'search_notes', arguments: searchArgs });
+    await sleep(200);
+    const result = await executeTool('search_notes', searchArgs);
+    send({ type: 'tool_result', id: searchId, name: 'search_notes', result });
+    const parsed = JSON.parse(result) as {
+      hits?: Array<{ citation?: number; title: string; snippet: string }>;
+    };
+    const hits = parsed.hits ?? [];
+    const text =
+      hits.length === 0
+        ? '（mock）已加载 skill job-interview，但知识库未命中。换关键词再问，或看文档页是否已索引。'
+        : `（mock）已加载 skill job-interview。按说明书只用知识库回答：\n${hits
+            .map((h) => `- [${h.citation ?? '?'}] ${h.title}：${h.snippet}`)
+            .join('\n')}`;
+    await streamText(text);
     send({ type: 'done' });
     return;
   }
@@ -199,9 +275,12 @@ async function runLive(
 
   // 对话上下文：system + 前端传来的 user/assistant
   const history: ChatCompletionMessageParam[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: buildSystemPrompt() },
     ...messages.map((m) => ({ role: m.role, content: m.content }) as const),
   ];
+
+  const lastUser = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+  await preloadMatchedSkills(lastUser, history, send);
 
   const maxRounds = 4;
   for (let round = 0; round < maxRounds; round += 1) {
