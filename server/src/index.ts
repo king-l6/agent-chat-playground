@@ -7,11 +7,10 @@ import dotenv from 'dotenv'
 import express from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import multer from 'multer'
 import { resolveLlmConfig, runAgentChat } from './agent.js'
 import { listSkills } from './skills.js'
-import { runWorkflow } from './workflow.js'
+import { runWorkflow, type PipelineStep } from './workflow.js'
 import {
   UPLOAD_DIR,
   commitUpload,
@@ -28,11 +27,16 @@ import {
   listIndexRows,
 } from './retrieve.js'
 import type { ChatMessageInput, SseEvent } from './types.js'
+import { getWorkspaceRoot, setWorkspaceRoot } from './workspace.js'
+import { REPO_ROOT } from './paths.js'
 
-// ESM 下没有 __dirname，用当前模块 URL 推出来
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-// 加载仓库根目录 .env；override:true 避免被 shell 里旧 OPENAI_* 盖掉
-dotenv.config({ path: path.resolve(__dirname, '../../.env'), override: true })
+dotenv.config({ path: path.join(REPO_ROOT, '.env'), override: true })
+if (process.env.PLAYGROUND_DATA) {
+  dotenv.config({
+    path: path.join(process.env.PLAYGROUND_DATA, '.env'),
+    override: true,
+  })
+}
 
 const app = express()
 const PORT = Number(process.env.PORT || 8790)
@@ -68,7 +72,27 @@ app.get('/api/health', (_req, res) => {
     model,
     rag: getRagStatus(),
     skills: listSkills(),
+    workspace: { root: getWorkspaceRoot() },
   })
+})
+
+app.get('/api/workspace', (_req, res) => {
+  res.json({ root: getWorkspaceRoot() })
+})
+
+app.post('/api/workspace', (req, res) => {
+  const raw = String(req.body?.root ?? '').trim()
+  if (!raw) {
+    res.status(400).json({ error: 'root 不能为空' })
+    return
+  }
+  try {
+    const root = setWorkspaceRoot(raw)
+    res.json({ ok: true, root })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: message })
+  }
 })
 
 app.get('/api/knowledge', (_req, res) => {
@@ -136,9 +160,9 @@ app.post('/api/workflow/run', async (req, res) => {
     return
   }
   const raw = req.body?.pipeline
-  const pipeline = Array.isArray(raw)
+  const pipeline: PipelineStep[] = Array.isArray(raw)
     ? raw
-        .map((item: unknown) => {
+        .map((item: unknown): PipelineStep | null => {
           if (!item || typeof item !== 'object') return null
           const rec = item as { id?: unknown; kind?: unknown; expression?: unknown }
           const kind = rec.kind
@@ -149,10 +173,10 @@ app.post('/api/workflow/run', async (req, res) => {
             expression: rec.expression != null ? String(rec.expression) : undefined,
           }
         })
-        .filter((s): s is { id: string; kind: 'search' | 'answer' | 'calc'; expression?: string } => s != null)
+        .filter((s): s is PipelineStep => s != null)
     : [
-        { id: 'search', kind: 'search' as const },
-        { id: 'answer', kind: 'answer' as const },
+        { id: 'search', kind: 'search' },
+        { id: 'answer', kind: 'answer' },
       ]
   if (pipeline.length === 0) {
     res.status(400).json({ error: '请从「提问」连出至少一步' })
@@ -220,11 +244,21 @@ app.post('/api/chat', async (req, res) => {
   }
 })
 
-app.listen(PORT, () => {
-  const { apiKey, model } = resolveLlmConfig()
-  const mode = apiKey ? 'live' : 'mock'
-  console.log(`[agent-chat] http://127.0.0.1:${PORT}  mode=${mode}  model=${model}`)
-  void ensureIndex().catch((err) => {
-    console.warn('[rag] 启动索引失败，先走关键词:', err)
+export function startServer(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const server = app.listen(PORT, '127.0.0.1', () => {
+      const { apiKey, model } = resolveLlmConfig()
+      const mode = apiKey ? 'live' : 'mock'
+      console.log(`[agent-chat] http://127.0.0.1:${PORT}  mode=${mode}  model=${model}`)
+      void ensureIndex().catch((err) => {
+        console.warn('[rag] 启动索引失败，先走关键词:', err)
+      })
+      resolve()
+    })
+    server.on('error', reject)
   })
-})
+}
+
+if (process.env.PLAYGROUND_EMBEDDED !== '1') {
+  void startServer()
+}

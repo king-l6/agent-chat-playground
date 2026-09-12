@@ -138,6 +138,12 @@ export type SkillMeta = {
   description: string
 }
 
+/** 当前 Agent 能碰的磁盘根目录；没选过是 null */
+export async function fetchWorkspace() {
+  const { data } = await axios.get<{ root: string | null }>(`${API_BASE}/api/workspace`);
+  return data.root;
+}
+
 export async function fetchHealth() {
   const { data } = await axios.get<{
     ok: boolean

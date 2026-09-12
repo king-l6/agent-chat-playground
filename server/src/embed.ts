@@ -6,11 +6,9 @@
  * 本课用本地 BGE-small-zh（ONNX），和中文手册同一向量空间，不依赖网关。
  */
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { DATA_DIR } from './paths.js'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const ROOT = path.resolve(__dirname, '../..')
-const MODEL_CACHE = path.join(ROOT, 'server', 'data', 'models')
+const MODEL_CACHE = path.join(DATA_DIR, 'models')
 
 export const EMBEDDING_MODEL = 'Xenova/bge-small-zh-v1.5'
 

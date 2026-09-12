@@ -11,7 +11,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
+import { DATA_DIR, HANDBOOK_PATH } from './paths.js'
 
 /** 知识库里的一块文本（入库后的稳定结构，不含 citation） */
 export type KnowledgeChunk = {
@@ -40,12 +40,7 @@ export type SearchHit = KnowledgeChunk & {
   context?: string
 }
 
-// ESM 模块没有 __dirname，用当前文件 URL 推算所在目录
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-// 仓库根目录：knowledge.ts 在 server/src/，往上两级就是项目根
-const ROOT = path.resolve(__dirname, '../..')
-
-export const DATA_DIR = path.join(ROOT, 'server', 'data')
+export { DATA_DIR }
 export const UPLOAD_DIR = path.join(DATA_DIR, 'uploads')
 export const INDEX_PATH = path.join(DATA_DIR, 'index.json')
 const MANIFEST_PATH = path.join(DATA_DIR, 'manifest.json')
@@ -442,7 +437,7 @@ function loadAllChunks(): KnowledgeChunk[] {
   }
 
   // 2) 仓库根目录的求职补充手册（读失败只 warn，不阻断服务）
-  const handbookPath = path.join(ROOT, '求职补充手册.md')
+  const handbookPath = HANDBOOK_PATH
   try {
     const raw = fs.readFileSync(handbookPath, 'utf8')
     chunks.push(...chunkMarkdown('handbook', raw, '求职补充手册'))
@@ -471,7 +466,7 @@ export function loadCoreChunks(): KnowledgeChunk[] {
   for (const doc of BUILTIN_DOCS) {
     chunks.push(...chunkMarkdown(doc.docId, doc.body, doc.title))
   }
-  const handbookPath = path.join(ROOT, '求职补充手册.md')
+  const handbookPath = HANDBOOK_PATH
   try {
     const raw = fs.readFileSync(handbookPath, 'utf8')
     chunks.push(...chunkMarkdown('handbook', raw, '求职补充手册'))

@@ -53,8 +53,20 @@ npm run dev
 
 - 前端 http://127.0.0.1:5176
 - 后端 http://127.0.0.1:8790
+- 桌面壳：`npm run electron:dev`（本应用窗口，不是系统浏览器）。网页模式仍是 `npm run dev`。  
+  若 `electron` 命令没有二进制：`npm run electron:download`。不要和已经占用 5176 的 `npm run dev` 叠开两份 Vite。  
+  打开后菜单「文件 → 打开工作区」选本仓库，再问「读一下 README.md」或「当前改了什么？」。路径逃出根目录会被拒绝；git 工具只读，不会 checkout。
 
 Live：填公司网关 `ANTHROPIC_*` 或任意 OpenAI 兼容 `OPENAI_*`。Embedding 走本地模型，不要把 chat 接口当成 `/embeddings`。
+
+安装包（别人不用装 Node）：
+
+```bash
+npm run dist
+```
+
+产物在 `release/`：macOS arm64 的 zip / dmg。未签名，第一次打开用右键 → 打开。打包装载自带后端，先关掉本机已经占用 8790 的 `npm run dev`。  
+挂到 GitHub：`git tag v0.1.0 && git push origin v0.1.0`，Actions 会上传到 https://github.com/king-l6/agent-chat-playground/releases
 
 ## 简历可写（须能演示）
 
@@ -78,6 +90,7 @@ src/                  React：对话 / 文档 / 向量 / 画布
   api/chat.ts         SSE 客户端 + workflow POST
   pipelineFromGraph.ts  DAG 拓扑序 + 分流编译
   canvasStore.ts      只存拓扑，不存上一轮输出
+electron/             桌面壳：主进程加载 Vite；文件菜单打开工作区；网页 dev 不走这里
 server/src/
   index.ts            Express：SSE / 知识库 / 跑图
   agent.ts            Agent 循环

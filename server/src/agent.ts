@@ -37,6 +37,8 @@ function buildSystemPrompt() {
 8. Skill 是说明书，不是函数。已安装 Skill：
 ${skillsCatalogText()}
 用户任务匹配某条 description 时，先 load_skill(name)，再按返回的 body 执行。同一 skill 每轮最多一次。若 history 里已经有该 skill 的 load_skill 结果，直接按 body 执行，不要再 load。问时间、算术、掷骰子不要 load_skill。
+9. 用户要读/写/列出已选工作区里的文件时，调用 workspace_read / workspace_write / workspace_list。path 只用相对路径（如 README.md）。读项目说明、SSE、简历缺口仍优先 search_notes，不要用工作区代替知识库。
+10. 用户问当前改了什么、未提交、diff 时，先 git_status，需要看具体行再 git_diff。不要 checkout / reset。
 `;
 }
 
@@ -101,6 +103,12 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
   const wantsCalc = /算|计算|\d+\s*[\+\-\*\/]/.test(lower);
   const wantsInterviewSkill = matchesInterviewSkill(last);
   const wantsSearch = /项目|sse|tool|agent|技术栈|简历|rag|知识库/.test(lower);
+  const wantsWorkspace =
+    /readme|\.md|工作区|读一下.*文件|打开.*文件|workspace_read/i.test(last) &&
+    /读|看|打开|列出|list|readme/i.test(last);
+  const wantsGit = /改了什么|当前改动|未提交|git status|git diff|有哪些改|看一下 diff/i.test(
+    last,
+  );
 
   /** 把整段回答拆成小块推 text_delta，模拟打字机 */
   const streamText = async (text: string) => {
@@ -148,6 +156,58 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
     }
     send({ type: 'done' });
     return;
+  }
+
+  if (wantsGit) {
+    const statusId = 'mock_git_status'
+    send({ type: 'tool_start', id: statusId, name: 'git_status', arguments: '{}' })
+    await sleep(160)
+    try {
+      const statusRaw = await executeTool('git_status', '{}')
+      send({ type: 'tool_result', id: statusId, name: 'git_status', result: statusRaw })
+      const diffId = 'mock_git_diff'
+      send({ type: 'tool_start', id: diffId, name: 'git_diff', arguments: '{}' })
+      await sleep(160)
+      const diffRaw = await executeTool('git_diff', '{}')
+      send({ type: 'tool_result', id: diffId, name: 'git_diff', result: diffRaw })
+      const status = JSON.parse(statusRaw) as { status: string }
+      const diff = JSON.parse(diffRaw) as { diff: string }
+      const lines = status.status.split('\n').filter(Boolean).slice(0, 12)
+      await streamText(
+        `（mock）git_status：\n${lines.join('\n')}\n\n（diff 已截取前几行）\n${diff.diff.slice(0, 400)}`,
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      send({ type: 'tool_error', id: statusId, name: 'git_status', error: message })
+      await streamText(`（mock）读取 git 失败：${message}`)
+    }
+    send({ type: 'done' })
+    return
+  }
+
+  // —— 工作区读文件（先于知识库，避免「读 README」被搜笔记抢走）——
+  if (wantsWorkspace) {
+    const rel =
+      last.match(/([\w./-]+\.(?:md|txt|ts|tsx|json))/)?.[1] ?? 'README.md'
+    const id = 'mock_ws_1'
+    const args = JSON.stringify({ path: rel })
+    send({ type: 'tool_start', id, name: 'workspace_read', arguments: args })
+    await sleep(200)
+    try {
+      const result = await executeTool('workspace_read', args)
+      send({ type: 'tool_result', id, name: 'workspace_read', result })
+      const parsed = JSON.parse(result) as { path: string; content: string }
+      const preview = parsed.content.slice(0, 400)
+      await streamText(
+        `（mock）已读工作区 ${parsed.path}：\n${preview}${parsed.content.length > 400 ? '…' : ''}`,
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      send({ type: 'tool_error', id, name: 'workspace_read', error: message })
+      await streamText(`（mock）读取失败：${message}`)
+    }
+    send({ type: 'done' })
+    return
   }
 
   // —— Skill：先加载说明书，再按正文去检索 ——
@@ -337,6 +397,7 @@ async function runLive(
     });
     // 逐个执行工具，结果以 role:tool 写回，并推 SSE 给前端卡片
     for (const call of toolCalls) {
+      if (call.type !== 'function') continue
       const name = call.function.name;
       const args = call.function.arguments;
       send({ type: 'tool_start', id: call.id, name, arguments: args });
@@ -388,5 +449,24 @@ export async function runAgentChat(options: {
   }
 
   const client = new OpenAI({ apiKey, baseURL });
-  await runLive(client, model, options.messages, options.send);
+  try {
+    await runLive(client, model, options.messages, options.send);
+  } catch (err) {
+    throw wrapLlmError(err, baseURL);
+  }
+}
+
+/** SDK 的 "Connection error." 看不出是网关挂了还是工作区坏了 */
+function wrapLlmError(err: unknown, baseURL?: string) {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (
+    raw === 'Connection error.' ||
+    /fetch failed|ENOTFOUND|ECONNREFUSED|getaddrinfo/i.test(raw)
+  ) {
+    const where = baseURL ? `（${baseURL}）` : '';
+    return new Error(
+      `模型网关连不上${where}。本地后端是好的，不是工作区坏了。多半没连公司网/VPN。可以先注释 .env 里的 API Key，重启后再问，会走 mock，工具卡片还能演示。`,
+    );
+  }
+  return err instanceof Error ? err : new Error(raw);
 }

@@ -2,13 +2,21 @@
   "name": "agent-chat-playground",
   "private": true,
   "version": "0.1.0",
+  "description": "可下载的本地 Agent 工作台：SSE、工具调用、工作区沙箱",
+  "author": "刘浩然",
   "type": "module",
+  "main": "dist-electron/main.js",
   "scripts": {
     "dev": "concurrently -k -n server,web -c yellow,cyan \"npm:dev:server\" \"npm:dev:web\"",
     "dev:web": "vite",
     "dev:server": "tsx watch server/src/index.ts",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "electron:compile": "tsc -p tsconfig.electron.json && cp electron/preload.cjs dist-electron/preload.cjs",
+    "electron:download": "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ node node_modules/electron/install.js",
+    "electron:dev": "concurrently -k -n server,web,desk -c yellow,cyan,magenta \"npm:dev:server\" \"npm:dev:web\" \"wait-on http://localhost:5176 && npm run electron:compile && electron .\"",
+    "pack:app": "npm run electron:compile && tsc -p tsconfig.server.json && ELECTRON_BUILD=1 VITE_API_BASE=http://127.0.0.1:8790 vite build",
+    "dist": "npm run pack:app && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --publish never",
     "eval:rag": "tsx server/src/eval.ts",
     "lint": "oxlint"
   },
@@ -35,9 +43,12 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
     "concurrently": "^10.0.4",
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
     "oxlint": "^1.75.0",
     "tsx": "^4.23.5",
     "typescript": "~6.0.2",
-    "vite": "^8.2.0"
+    "vite": "^8.2.0",
+    "wait-on": "^9.1.0"
   }
 }

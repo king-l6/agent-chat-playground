@@ -10,6 +10,7 @@ import { MessageList } from './components/MessageList';
 import { DocumentsPage } from './components/DocumentsPage';
 import { VectorsPage } from './components/VectorsPage';
 import { CanvasPage } from './components/CanvasPage';
+import { WorkspaceBar } from './components/WorkspaceBar';
 import './components/AppShell.css';
 
 /** 生成前端本地唯一 id（消息 id、助手气泡 id） */
@@ -228,7 +229,8 @@ export default function App() {
 
   return (
     <div className={page === 'chat' ? 'app' : 'app app--kb'}>
-      <header className='topbar'>
+      <header className="chrome">
+      <div className='topbar'>
         <div>
           <div className='brand'>Agent Chat Playground</div>
           <div className='sub'>SSE · Tool · Skill · RAG · 编排画布</div>
@@ -263,6 +265,8 @@ export default function App() {
             {mode === 'unknown' && '后端未连接'}
           </div>
         </div>
+      </div>
+      <WorkspaceBar />
       </header>
 
       {page === 'documents' ? (
@@ -297,7 +301,7 @@ export default function App() {
 
         {/* 一键示例问题 */}
         <div className='hints'>
-          {['现在几点了？', '帮我算 123*456', '这个项目技术栈是什么？', '请按面试口径介绍这个项目'].map(
+          {['现在几点了？', '帮我算 123*456', '读一下 README.md', '当前改了什么？', '这个项目技术栈是什么？'].map(
             (q) => (
               <button
                 key={q}

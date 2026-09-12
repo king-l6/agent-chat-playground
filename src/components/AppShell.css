@@ -15,18 +15,90 @@
     sans-serif;
 }
 
+.chrome {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
 .topbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
-  padding: 1rem 1.25rem;
-  border-bottom: 1px solid #e2e8f0;
+  padding: 1rem 1.25rem 0.75rem;
   background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(8px);
-  position: sticky;
-  top: 0;
-  z-index: 10;
+}
+
+.wsbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 1.25rem 0.55rem;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+.wsbar--on {
+  background: #ecfdf5;
+  border-bottom-color: #bbf7d0;
+  color: #065f46;
+}
+
+.wsbar__text {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.65rem;
+}
+
+.wsbar__label {
+  font-weight: 750;
+  color: inherit;
+}
+
+.wsbar__path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+.wsbar__full {
+  display: block;
+  margin-top: 0.1rem;
+  font-size: 0.72rem;
+  color: #047857;
+  word-break: break-all;
+}
+
+.wsbar__empty {
+  color: #64748b;
+}
+
+.wsbar__err {
+  color: #b91c1c;
+}
+
+.wsbar__btn {
+  flex-shrink: 0;
+  border: 1px solid #86efac;
+  background: #fff;
+  color: #047857;
+  font-weight: 650;
+  font-size: 0.78rem;
+  border-radius: 999px;
+  padding: 0.28rem 0.75rem;
+  cursor: pointer;
+}
+
+.wsbar__hint {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: #94a3b8;
 }
 
 .brand {

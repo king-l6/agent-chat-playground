@@ -7,6 +7,8 @@ import type { ChatCompletionTool } from 'openai/resources/chat/completions'
 // 引用 RAG：retrieve.ts 负责向量/关键词，这里只做工具入口 + JSON
 import { retrieve } from './retrieve.js'
 import { readSkill } from './skills.js'
+import { workspaceList, workspaceRead, workspaceWrite } from './workspace.js'
+import { gitDiff, gitStatus } from './git.js'
 
 /** 交给大模型的工具清单（function calling schema） */
 export const toolDefinitions: ChatCompletionTool[] = [
@@ -76,6 +78,97 @@ export const toolDefinitions: ChatCompletionTool[] = [
           },
         },
         required: ['name'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'workspace_list',
+      description:
+        '列出已选工作区里某个相对路径下的文件和目录。用户要看仓库里有什么、打开某个文件夹时调用。path 省略表示根目录。不能用绝对路径或 .. 逃出工作区。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: '相对工作区根的路径，默认 "."',
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'workspace_read',
+      description:
+        '读取已选工作区里的一个文本文件。用户要看 README、源码、配置时调用。path 必须是相对路径，例如 README.md。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: '相对工作区根的文件路径，例如 README.md',
+          },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'workspace_write',
+      description:
+        '向已选工作区写入一个文本文件。path 必须是相对路径。禁止用 .. 或绝对路径写出工作区。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: '相对工作区根的文件路径',
+          },
+          content: {
+            type: 'string',
+            description: '要写入的全文',
+          },
+        },
+        required: ['path', 'content'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'git_status',
+      description:
+        '查看已选工作区的 git 状态（相对 HEAD 的未提交改动列表）。用户问当前改了什么、有哪些未提交文件时先调用。只读。',
+      parameters: {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'git_diff',
+      description:
+        '查看已选工作区相对 HEAD 的 diff。用户问具体改了哪些行时调用。path 可省略（整个仓库）；若提供必须是工作区内相对路径。只读，不会 checkout。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: '可选，相对工作区根的文件路径',
+          },
+        },
         additionalProperties: false,
       },
     },
@@ -224,6 +317,27 @@ export async function executeTool(
       )
     }
 
+    case 'workspace_list': {
+      const rel = String(args.path ?? '.')
+      return JSON.stringify({ entries: workspaceList(rel) }, null, 2)
+    }
+    case 'workspace_read': {
+      const rel = String(args.path ?? '').trim()
+      if (!rel) throw new Error('缺少 path')
+      return JSON.stringify({ path: rel, content: workspaceRead(rel) }, null, 2)
+    }
+    case 'workspace_write': {
+      const rel = String(args.path ?? '').trim()
+      const content = String(args.content ?? '')
+      if (!rel) throw new Error('缺少 path')
+      return JSON.stringify(workspaceWrite(rel, content), null, 2)
+    }
+    case 'git_status':
+      return JSON.stringify(gitStatus(), null, 2)
+    case 'git_diff': {
+      const rel = String(args.path ?? '').trim()
+      return JSON.stringify(gitDiff(rel || undefined), null, 2)
+    }
     case 'roll_dice': {
       const sides = Math.min(Math.max(Number(args.sides ?? 6), 2), 100)
       const count = Math.min(Math.max(Number(args.count ?? 1), 1), 10)
