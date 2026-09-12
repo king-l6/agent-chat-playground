@@ -11,6 +11,8 @@ import { DocumentsPage } from './components/DocumentsPage';
 import { VectorsPage } from './components/VectorsPage';
 import { CanvasPage } from './components/CanvasPage';
 import { WorkspaceBar } from './components/WorkspaceBar';
+import { SettingsPage } from './components/SettingsPage';
+import { DeliveryPage } from './components/DeliveryPage';
 import './components/AppShell.css';
 
 /** 生成前端本地唯一 id（消息 id、助手气泡 id） */
@@ -18,11 +20,13 @@ function uid() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function pageFromHash(): 'chat' | 'documents' | 'vectors' | 'canvas' {
+function pageFromHash(): 'chat' | 'documents' | 'vectors' | 'canvas' | 'settings' | 'delivery' {
   const path = location.hash.replace(/^#\/?/, '').split('?')[0]
   if (path.startsWith('canvas') || path.startsWith('workflow')) return 'canvas'
   if (path.startsWith('vectors')) return 'vectors'
   if (path.startsWith('documents') || path.startsWith('knowledge')) return 'documents'
+  if (path.startsWith('settings') || path.startsWith('config')) return 'settings'
+  if (path.startsWith('delivery')) return 'delivery'
   return 'chat'
 }
 
@@ -38,7 +42,9 @@ export default function App() {
   const [model, setModel] = useState<string>('');
   const [rag, setRag] = useState<RagStatus | null>(null);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
-  const [page, setPage] = useState<'chat' | 'documents' | 'vectors' | 'canvas'>(pageFromHash);
+  const [page, setPage] = useState<
+    'chat' | 'documents' | 'vectors' | 'canvas' | 'settings' | 'delivery'
+  >(pageFromHash);
   /** 顶部/底部错误条 */
   const [error, setError] = useState<string>('');
   /** 当前请求的 AbortController，点停止时 abort */
@@ -258,12 +264,24 @@ export default function App() {
             >
               编排
             </a>
+            <a
+              className={page === 'delivery' ? 'nav__link nav__link--on' : 'nav__link'}
+              href="#/delivery"
+            >
+              交付
+            </a>
+            <a
+              className={page === 'settings' ? 'nav__link nav__link--on' : 'nav__link'}
+              href="#/settings"
+            >
+              配置
+            </a>
           </nav>
-          <div className={`badge badge--${mode}`}>
+          <a className={`badge badge--${mode}`} href="#/settings" title="配置 API Key">
             {mode === 'live' && `LIVE${model ? ` · ${model}` : ''}`}
             {mode === 'mock' && 'MOCK（未配置 API Key）'}
             {mode === 'unknown' && '后端未连接'}
-          </div>
+          </a>
         </div>
       </div>
       <WorkspaceBar />
@@ -275,6 +293,15 @@ export default function App() {
         <VectorsPage />
       ) : page === 'canvas' ? (
         <CanvasPage />
+      ) : page === 'settings' ? (
+        <SettingsPage
+          onSaved={(next) => {
+            setMode(next.mode)
+            setModel(next.model)
+          }}
+        />
+      ) : page === 'delivery' ? (
+        <DeliveryPage />
       ) : (
         <>
       <main className='main'>

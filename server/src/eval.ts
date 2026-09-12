@@ -5,24 +5,15 @@
  *   npm run eval:rag -- --sweep   只扫切块（仍走 vector，和上一课同一张表）
  */
 import dotenv from 'dotenv'
-import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { loadGoldCases, type GoldCase } from './eval-cases.js'
 import { configureChunking, getChunkParams, loadCoreChunks } from './knowledge.js'
 import { expandWithNeighbors, indexChunksInMemory, searchHybrid, searchRerank, searchVectors } from './retrieve.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '../..')
 dotenv.config({ path: path.join(ROOT, '.env'), override: true })
-
-const GOLD_PATH = path.join(ROOT, 'server', 'eval', 'gold.json')
-
-type GoldCase = {
-  id: string
-  query: string
-  docId: string
-  contains: string
-}
 
 type GoldFile = {
   topK: number
@@ -92,7 +83,7 @@ async function embedConfig(maxChars: number, overlap: number) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
-  const gold = JSON.parse(fs.readFileSync(GOLD_PATH, 'utf8')) as GoldFile
+  const gold = loadGoldCases() as GoldFile
   const topK = args.topK || gold.topK || 3
 
   console.log(

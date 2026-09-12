@@ -8,6 +8,7 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
 } from 'openai/resources/chat/completions';
+import { resolveLlmFromSettings } from './settings.js';
 import { skillsCatalogText } from './skills.js';
 import { executeTool, toolDefinitions } from './tools.js';
 import type { ChatMessageInput, SseEvent } from './types.js';
@@ -265,37 +266,14 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
 
   // 都不匹配：提示怎么用
   await streamText(
-    '（mock 模式）当前未配置 API Key。你可以问：现在几点？帮我算 123*456；这个项目的技术栈是什么？\n配置 `.env` 里的 ANTHROPIC_API_KEY（或 OPENAI_API_KEY）后即可走真实模型。',
+    '（mock 模式）当前未配置 API Key。你可以问：现在几点？帮我算 123*456；这个项目的技术栈是什么？\n到「配置」页填 API Key 后即可走真实模型。',
   );
   send({ type: 'done' });
 }
 
-/**
- * 从环境变量解析 Key / BaseURL / Model
- * 支持 OPENAI_*，也兼容公司网关 ANTHROPIC_*（Base 会自动补 /v1）
- */
+/** 面板配置优先；mock 会压过 .env 里的 Key */
 export function resolveLlmConfig() {
-  const apiKey =
-    process.env.OPENAI_API_KEY?.trim() ||
-    process.env.ANTHROPIC_API_KEY?.trim() ||
-    '';
-
-  const openaiBase = process.env.OPENAI_BASE_URL?.trim();
-  const anthropicBase = process.env.ANTHROPIC_BASE_URL?.trim()?.replace(
-    /\/$/,
-    '',
-  );
-  const baseURL =
-    openaiBase || (anthropicBase ? `${anthropicBase}/v1` : undefined);
-
-  const model =
-    process.env.OPENAI_MODEL?.trim() ||
-    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL?.trim() ||
-    process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL?.trim() ||
-    process.env.ANTHROPIC_DEFAULT_OPUS_MODEL?.trim() ||
-    'deepseek-v4-flash';
-
-  return { apiKey, baseURL, model };
+  return resolveLlmFromSettings();
 }
 
 /**
@@ -465,7 +443,7 @@ function wrapLlmError(err: unknown, baseURL?: string) {
   ) {
     const where = baseURL ? `（${baseURL}）` : '';
     return new Error(
-      `模型网关连不上${where}。本地后端是好的，不是工作区坏了。多半没连公司网/VPN。可以先注释 .env 里的 API Key，重启后再问，会走 mock，工具卡片还能演示。`,
+      `模型网关连不上${where}。本地后端是好的，不是工作区坏了。多半没连公司网/VPN。到「配置」页切到 MOCK 就能继续演示工具卡片。`,
     );
   }
   return err instanceof Error ? err : new Error(raw);

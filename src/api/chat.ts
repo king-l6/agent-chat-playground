@@ -144,6 +144,36 @@ export async function fetchWorkspace() {
   return data.root;
 }
 
+export type LlmSettingsPublic = {
+  mode: 'mock' | 'live'
+  hasKey: boolean
+  baseURL: string
+  model: string
+}
+
+export async function fetchSettings() {
+  const { data } = await axios.get<LlmSettingsPublic>(`${API_BASE}/api/settings`)
+  return data
+}
+
+export async function saveSettings(body: {
+  mode: 'mock' | 'live'
+  apiKey?: string
+  baseURL?: string
+  model?: string
+}) {
+  try {
+    const { data } = await axios.put<LlmSettingsPublic>(`${API_BASE}/api/settings`, body)
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
 export async function fetchHealth() {
   const { data } = await axios.get<{
     ok: boolean

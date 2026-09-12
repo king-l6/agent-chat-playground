@@ -31,6 +31,17 @@
   backdrop-filter: blur(8px);
 }
 
+.topbar__right {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+a.badge {
+  text-decoration: none;
+}
+
 .wsbar {
   display: flex;
   align-items: center;

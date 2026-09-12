@@ -66,3 +66,7 @@ export type SseEvent =
   | { type: 'done' }
   /** 整轮出错（网络/模型异常等），前端展示错误并可结束 busy */
   | { type: 'error'; message: string }
+  | { type: 'role_start'; role: 'pm' | 'dev' | 'review' | 'qa' }
+  | { type: 'role_done'; role: 'pm' | 'dev' | 'review' | 'qa' }
+  | { type: 'artifact'; name: string; payload: unknown }
+  | { type: 'gate_blocked'; gate: string; message: string }

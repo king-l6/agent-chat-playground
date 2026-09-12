@@ -1,0 +1,128 @@
+.delivery__grid {
+  display: grid;
+  gap: 1rem;
+}
+
+@media (min-width: 960px) {
+  .delivery__grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.seatbar,
+.lane,
+.delivery__btns,
+.delivery__turn {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.seatbar__btn,
+.delivery__btns button,
+.delivery__turn button {
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  border-radius: 999px;
+  padding: 0.35rem 0.8rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.seatbar__btn--on {
+  background: #0f172a;
+  color: #fff;
+  border-color: #0f172a;
+}
+
+.lane {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.lane__item {
+  font-size: 0.78rem;
+  color: #94a3b8;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  background: #f1f5f9;
+}
+
+.lane__item--on {
+  color: #1d4ed8;
+  background: #dbeafe;
+  font-weight: 700;
+}
+
+.delivery__fields,
+.delivery__arts,
+.delivery__actions {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0 1.1rem 1.1rem;
+}
+
+.delivery__fields label,
+.delivery__ac {
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.delivery__ac {
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  font-weight: 400;
+}
+
+.delivery__fields input,
+.delivery__fields textarea,
+.delivery__actions input,
+.delivery__actions textarea,
+.delivery__turn input {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 0.55rem 0.7rem;
+  font: inherit;
+  font-weight: 400;
+}
+
+.delivery__fields input:disabled,
+.delivery__fields textarea:disabled {
+  background: #f8fafc;
+  color: #64748b;
+}
+
+.delivery__arts pre {
+  white-space: pre-wrap;
+  font-size: 0.75rem;
+  background: #f8fafc;
+  padding: 0.5rem;
+  border-radius: 8px;
+}
+
+.delivery__q {
+  font-size: 0.82rem;
+}
+
+.delivery__turn {
+  align-items: center;
+}
+
+.delivery__turn input {
+  flex: 1;
+}
+
+.delivery__path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  border: 0;
+  background: none;
+  color: #1d4ed8;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}

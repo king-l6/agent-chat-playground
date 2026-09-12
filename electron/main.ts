@@ -110,10 +110,24 @@ function installMenu() {
             } catch (err) {
               console.error(err)
             }
+            },
           },
-        },
-      ],
-    },
+          {
+            label: '模型配置',
+            click: () => {
+              const win = BrowserWindow.getFocusedWindow()
+              void win?.webContents.executeJavaScript(`location.hash = '#/settings'`)
+            },
+          },
+          {
+            label: '交付工作台',
+            click: () => {
+              const win = BrowserWindow.getFocusedWindow()
+              void win?.webContents.executeJavaScript(`location.hash = '#/delivery'`)
+            },
+          },
+        ],
+      },
     { role: 'editMenu' },
     { role: 'viewMenu' },
     { role: 'windowMenu' },

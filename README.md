@@ -1,24 +1,26 @@
 # Agent Chat Playground
 
-可演示的 **AI Agent 前端**：SSE 对话、Tool Calling 卡片、已连接 Skill、本地 RAG、编排画布。
+可下载的 **本地 Agent 交付工作台**：Electron 选仓库、产研泳道带闸门、内核仍是 SSE / 工具 / Skill / RAG / 画布。
 
 仓库：https://github.com/king-l6/agent-chat-playground  
-无 API Key 也能用 mock 跑通流式和工具卡片。
+安装包：https://github.com/king-l6/agent-chat-playground/releases/tag/v0.1.0  
+无 API Key 也能用 mock。网页和桌面都在 `#/settings` 填自己的 Key。
 
-**不是 Dify。** 用来证明：流式协议、工具状态机、检索引用、画布执行器，都能自己落地，并说清和 Chatbot / Agent / 工作流的差别。
+**不是 Cursor，也不是 Dify。** 控制面是人点的确认 / 撤回 / 放行 / 签字，不是模型自己往下跳。
 
 ## 90 秒演示（面试用）
 
-`npm run dev` 后按这个顺序，不要东点西点。
+打开安装包（或 `npm run electron:dev`）→ 选本仓库 → `#/delivery`。不要先去画布里乱点。
 
 | 秒 | 打开 | 做什么 | 面试官应看到 |
 |----|------|--------|--------------|
-| 0–20 | http://127.0.0.1:5176/#/ | 「现在几点了？」 | 先出工具卡片，再出回答（不是纯 chatbot） |
-| 20–40 | 同一页 | 「请按面试口径介绍这个项目」 | 先出紫色 Skill 卡片（`job-interview`），再出 `search_notes` 和带 `[1]` 的回答 |
-| 40–55 | `#/vectors` | 扫一眼 | 有本地向量索引，不是「调了个搜索 API」 |
-| 55–90 | `#/canvas` →「示例：按问题分流」 | 先跑 `123*456`，再跑「每天优先学什么」 | 同一张图，算式走计算器、问文档走检索 |
+| 0–15 | 安装包 / 桌面窗 | 选本仓库 | 工作区条出现仓库名，不是系统浏览器 |
+| 15–35 | `#/delivery` 身份=产品 | 一句话「给 RAG 评测加一道题」→ 出产物 → 勾 1 条验收 → 确认流转 | 没勾确认被拒；确认后正文变灰 |
+| 35–55 | 身份=研发 | 出产物 → 开发完成 | 只改 `server/src/eval-cases.ts`；改不了 `agent.ts` |
+| 55–75 | 身份=测试 | 出评审（带路径）→ 放行 → 出测试报告 → 签字 | 意见能点到文件；报告里有 `eval:rag` 退出码 |
+| 75–90 | 指闸门 | 说「撤回才会解冻，带风险放行必须写理由」 | 进度条不会自己往前跳 |
 
-可选：终端再跑 `npm run eval:rag`，说「8 道黄金问题，向量 75% → hybrid 88% → rerank 100%」。
+内核还在：`#/` 问「现在几点了？」看工具卡片；`#/canvas` 对照「人画的流程」。`npm run eval:rag` 原 8 题不能坏。
 
 ## 三套机制（口述核心）
 
@@ -40,6 +42,8 @@ RAG 是能力（切块 / 向量 / 关键词 / 重排 / 引用），可以挂在 
 | 文档 | `#/documents` | 上传 md/txt，增量进索引 |
 | 向量库 | `#/vectors` | 看 chunk、向量是否已编码 |
 | 编排 | `#/canvas` | 沿边执行；计算器节点；DAG；条件分流；图存 localStorage（不存运行结果） |
+| 交付 | `#/delivery` | 单人切 pm/dev/qa；确认才冻结；研发白名单写文件；评审带路径；测试只证明已勾验收 |
+| 配置 | `#/settings` | MOCK / LIVE；填自己的 API Key，网页和桌面同一页 |
 
 检索链路（`search_notes` / 画布检索节点同一套）：切块 280/重叠 60 → 本地 BGE-small-zh → 向量+关键词 RRF → ngram 重排 → 命中块左右邻接拼给模型。
 
@@ -57,7 +61,7 @@ npm run dev
   若 `electron` 命令没有二进制：`npm run electron:download`。不要和已经占用 5176 的 `npm run dev` 叠开两份 Vite。  
   打开后菜单「文件 → 打开工作区」选本仓库，再问「读一下 README.md」或「当前改了什么？」。路径逃出根目录会被拒绝；git 工具只读，不会 checkout。
 
-Live：填公司网关 `ANTHROPIC_*` 或任意 OpenAI 兼容 `OPENAI_*`。Embedding 走本地模型，不要把 chat 接口当成 `/embeddings`。
+Live：打开 `#/settings` 填自己的 API Key / Base URL / 模型，或切回 MOCK。网页和桌面同一页。也可以继续用 `.env` 的 `ANTHROPIC_*` / `OPENAI_*`。Embedding 走本地模型，不要把 chat 接口当成 `/embeddings`。
 
 安装包（别人不用装 Node）：
 
@@ -65,23 +69,30 @@ Live：填公司网关 `ANTHROPIC_*` 或任意 OpenAI 兼容 `OPENAI_*`。Embedd
 npm run dist
 ```
 
-产物在 `release/`：macOS arm64 的 zip / dmg。未签名，第一次打开用右键 → 打开。打包装载自带后端，先关掉本机已经占用 8790 的 `npm run dev`。  
-挂到 GitHub：`git tag v0.1.0 && git push origin v0.1.0`，Actions 会上传到 https://github.com/king-l6/agent-chat-playground/releases
+产物在 `release/`：macOS arm64 的 zip / dmg。未签名，从网上下下来会被系统标成「已损坏」，右键打开不够，拖进「应用程序」后在终端执行：
+
+```bash
+xattr -cr "/Applications/Agent Chat Playground.app"
+```
+
+再双击即可。打包装载自带后端，先关掉本机已经占用 8790 的 `npm run dev`。  
+下载：https://github.com/king-l6/agent-chat-playground/releases/tag/v0.2.0
 
 ## 简历可写（须能演示）
 
-- React + TS 实现 SSE 流式对话：边收边渲染、Abort 停止、工具卡片状态机
-- Node 对接 OpenAI 兼容 API，多轮 tool calling 后再汇总回答；无 Key 时 mock 仍可演示
-- Agent Skill 已连接：扫描 `server/skills/*/SKILL.md`，system 只放 name+description，正文经 `load_skill` 按需注入
-- 本地 RAG：BGE 向量 + 关键词融合 + 重排；黄金集 8 题 Recall@3 从 75% 提到 100%；回答带引用
-- 编排画布：拓扑序执行 DAG，条件边编译成 pipeline；图与一次运行结果分开存储
+- 用 Electron 做出可安装的本地 Agent 工作台：选仓库后受限读写文件，并读取 git status / diff
+- 按产研泳道流转：产品把一句话打成带验收标准的需求文档，多轮改完确认后才到研发；评审对照 diff，测试只证明已确认的验收
+- 对着本仓库跑通一条竖切（给 RAG 评测加题），评审能指出具体文件风险，测试报告含自动命令结果与人工步骤
+- 内核复用 SSE 流式、tool calling、Skill、本地 RAG（Recall@3 75%→100%）与编排画布
 
 ## 有意没做（问到要承认）
 
-- 不是分布式向量库（pgvector / Pinecone）；索引在内存 + `server/data/index.json`
-- 画布分流是正则，不是小模型路由；结果进共享黑板，不是沿边传变量
-- 图画在浏览器 localStorage，不能跨设备协作
-- 无登录、无多租户、无生产观测
+- 不是 Cursor / 通用 IDE，实现只能改白名单文件
+- 不是多租户、无登录；单人切 pm / dev / qa
+- 没有 Windows 安装包；macOS 包未签名
+- 确认后不能悄悄改文档；撤回不会自动 git checkout
+- 无理由不能跳过评审或测试
+- 不是分布式向量库；画布分流是正则；图画在 localStorage
 
 ## 目录
 

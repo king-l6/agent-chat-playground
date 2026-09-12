@@ -9,6 +9,15 @@ import fs from 'node:fs'
 import path from 'node:path'
 import multer from 'multer'
 import { resolveLlmConfig, runAgentChat } from './agent.js'
+import { publicLlmSettings, saveLlmSettings, type LlmMode } from './settings.js'
+import {
+  applyGate,
+  changeSeat,
+  currentRun,
+  runDeliveryTurn,
+  updatePrd,
+} from './delivery/runtime.js'
+import { GateError, type GateAction, type Seat } from './delivery/types.js'
 import { listSkills } from './skills.js'
 import { runWorkflow, type PipelineStep } from './workflow.js'
 import {
@@ -39,7 +48,7 @@ if (process.env.PLAYGROUND_DATA) {
 }
 
 const app = express()
-const PORT = Number(process.env.PORT || 8790)
+const PORT = Number(process.env.PLAYGROUND_PORT || process.env.PORT || 8790)
 
 // 允许前端跨域（开发时 Vite 5176 → 后端 8790）
 app.use(
@@ -74,6 +83,129 @@ app.get('/api/health', (_req, res) => {
     skills: listSkills(),
     workspace: { root: getWorkspaceRoot() },
   })
+})
+
+app.get('/api/settings', (_req, res) => {
+  res.json(publicLlmSettings())
+})
+
+app.put('/api/settings', (req, res) => {
+  const mode = req.body?.mode
+  if (mode !== 'mock' && mode !== 'live') {
+    res.status(400).json({ error: 'mode 必须是 mock 或 live' })
+    return
+  }
+  try {
+    const saved = saveLlmSettings({
+      mode: mode as LlmMode,
+      apiKey: typeof req.body?.apiKey === 'string' ? req.body.apiKey : undefined,
+      baseURL: typeof req.body?.baseURL === 'string' ? req.body.baseURL : undefined,
+      model: typeof req.body?.model === 'string' ? req.body.model : undefined,
+    })
+    res.json(saved)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: message })
+  }
+})
+
+function parseSeat(raw: unknown): Seat | null {
+  return raw === 'pm' || raw === 'dev' || raw === 'qa' ? raw : null
+}
+
+app.get('/api/delivery', (_req, res) => {
+  res.json(currentRun())
+})
+
+app.put('/api/delivery/seat', (req, res) => {
+  const seat = parseSeat(req.body?.seat)
+  if (!seat) {
+    res.status(400).json({ error: 'seat 必须是 pm / dev / qa' })
+    return
+  }
+  res.json(changeSeat(seat))
+})
+
+app.put('/api/delivery/prd', (req, res) => {
+  const actor = parseSeat(req.body?.actor)
+  if (!actor) {
+    res.status(400).json({ error: 'actor 必须是 pm / dev / qa' })
+    return
+  }
+  try {
+    res.json(
+      updatePrd(actor, {
+        title: typeof req.body?.title === 'string' ? req.body.title : undefined,
+        oneLiner: typeof req.body?.oneLiner === 'string' ? req.body.oneLiner : undefined,
+        body: typeof req.body?.body === 'string' ? req.body.body : undefined,
+        acceptance: Array.isArray(req.body?.acceptance) ? req.body.acceptance : undefined,
+      }),
+    )
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(err instanceof GateError ? 400 : 500).json({
+      error: message,
+      gate: err instanceof GateError ? err.gate : undefined,
+    })
+  }
+})
+
+app.post('/api/delivery/gate', (req, res) => {
+  const actor = parseSeat(req.body?.actor)
+  const action = req.body?.action as GateAction
+  if (!actor) {
+    res.status(400).json({ error: 'actor 必须是 pm / dev / qa' })
+    return
+  }
+  try {
+    res.json(
+      applyGate(actor, action, {
+        reason: typeof req.body?.reason === 'string' ? req.body.reason : undefined,
+        questions: Array.isArray(req.body?.questions) ? req.body.questions.map(String) : undefined,
+      }),
+    )
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(err instanceof GateError ? 400 : 500).json({
+      error: message,
+      gate: err instanceof GateError ? err.gate : undefined,
+    })
+  }
+})
+
+app.post('/api/delivery/turn', async (req, res) => {
+  const actor = parseSeat(req.body?.actor)
+  const message = typeof req.body?.message === 'string' ? req.body.message : ''
+  if (!actor) {
+    res.status(400).json({ error: 'actor 必须是 pm / dev / qa' })
+    return
+  }
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
+  res.flushHeaders?.()
+  let closed = false
+  res.on('close', () => {
+    closed = true
+  })
+  const send = (event: SseEvent) => {
+    if (closed || res.writableEnded) return
+    res.write(`data: ${JSON.stringify(event)}\n\n`)
+  }
+  try {
+    await runDeliveryTurn(actor, message, send)
+  } catch (err) {
+    const messageText = err instanceof Error ? err.message : String(err)
+    if (err instanceof GateError) {
+      send({ type: 'gate_blocked', gate: err.gate, message: messageText })
+    } else {
+      send({ type: 'error', message: messageText })
+    }
+    send({ type: 'done' })
+  } finally {
+    if (!closed) res.end()
+  }
 })
 
 app.get('/api/workspace', (_req, res) => {
