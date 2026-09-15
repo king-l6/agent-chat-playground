@@ -233,8 +233,84 @@ export default function App() {
     abortRef.current?.abort();
   }
 
+  const talk = (
+    <div className="app__talk">
+      <main className="main">
+        {(rag || skills.length > 0) && (
+          <p className="rag-hint">
+            {rag && (
+              <a href="#/vectors">
+                检索 {rag.retrieval} · {rag.indexed}/{rag.chunks} 已编码 · {rag.docs} 篇
+              </a>
+            )}
+            {rag?.embedError ? ` · embed失败将走关键词` : ''}
+            {skills.length > 0
+              ? `${rag ? ' · ' : ''}已连接 skill：${skills.map((s) => s.name).join(', ')}`
+              : ''}
+          </p>
+        )}
+        <MessageList messages={messages} />
+        <div ref={bottomRef} />
+      </main>
+
+      <footer className="composer-wrap">
+        {error && <div className="error-banner">{error}</div>}
+        {page === 'chat' && (
+          <div className="hints">
+            {['现在几点了？', '帮我算 123*456', '读一下 README.md', '当前改了什么？', '这个项目技术栈是什么？'].map(
+              (q) => (
+                <button
+                  key={q}
+                  type="button"
+                  className="hint"
+                  disabled={busy}
+                  onClick={() => onSend(q)}
+                >
+                  {q}
+                </button>
+              ),
+            )}
+          </div>
+        )}
+        <form
+          className="composer"
+          onSubmit={(e) => {
+            e.preventDefault()
+            void onSend()
+          }}
+        >
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="输入问题，Enter 发送，Shift+Enter 换行"
+            rows={2}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                void onSend()
+              }
+            }}
+          />
+          {busy ? (
+            <button type="button" className="btn btn--stop" onClick={onStop}>
+              停止
+            </button>
+          ) : (
+            <button type="submit" className="btn" disabled={!input.trim()}>
+              发送
+            </button>
+          )}
+        </form>
+      </footer>
+    </div>
+  )
+
   return (
-    <div className={page === 'chat' ? 'app' : 'app app--kb'}>
+    <div
+      className={
+        page === 'delivery' ? 'app app--kb app--desk' : page === 'chat' ? 'app app--dock' : 'app app--dock app--split'
+      }
+    >
       <header className="chrome">
       <div className='topbar'>
         <div>
@@ -287,95 +363,28 @@ export default function App() {
       <WorkspaceBar />
       </header>
 
-      {page === 'documents' ? (
-        <DocumentsPage />
-      ) : page === 'vectors' ? (
-        <VectorsPage />
-      ) : page === 'canvas' ? (
-        <CanvasPage />
-      ) : page === 'settings' ? (
-        <SettingsPage
-          onSaved={(next) => {
-            setMode(next.mode)
-            setModel(next.model)
-          }}
-        />
-      ) : page === 'delivery' ? (
+      {page === 'delivery' ? (
         <DeliveryPage />
       ) : (
-        <>
-      <main className='main'>
-        {(rag || skills.length > 0) && (
-          <p className="rag-hint">
-            {rag && (
-              <a href="#/vectors">
-                检索 {rag.retrieval} · {rag.indexed}/{rag.chunks} 已编码 · {rag.docs} 篇
-              </a>
-            )}
-            {rag?.embedError ? ` · embed失败将走关键词` : ''}
-            {skills.length > 0
-              ? `${rag ? ' · ' : ''}已连接 skill：${skills.map((s) => s.name).join(', ')}`
-              : ''}
-          </p>
-        )}
-        <MessageList messages={messages} />
-        {/* 滚动锚点 */}
-        <div ref={bottomRef} />
-      </main>
-
-      <footer className='composer-wrap'>
-        {error && <div className='error-banner'>{error}</div>}
-
-        {/* 一键示例问题 */}
-        <div className='hints'>
-          {['现在几点了？', '帮我算 123*456', '读一下 README.md', '当前改了什么？', '这个项目技术栈是什么？'].map(
-            (q) => (
-              <button
-                key={q}
-                type='button'
-                className='hint'
-                disabled={busy}
-                onClick={() => onSend(q)}
-              >
-                {q}
-              </button>
-            ),
+        <div className={page === 'chat' ? 'app__stage app__stage--solo' : 'app__stage'}>
+          {talk}
+          {page !== 'chat' && (
+            <div className="app__side">
+              {page === 'documents' && <DocumentsPage />}
+              {page === 'vectors' && <VectorsPage />}
+              {page === 'canvas' && <CanvasPage />}
+              {page === 'settings' && (
+                <SettingsPage
+                  onSaved={(next) => {
+                    setMode(next.mode)
+                    setModel(next.model)
+                  }}
+                />
+              )}
+            </div>
           )}
         </div>
-
-        <form
-          className='composer'
-          onSubmit={(e) => {
-            e.preventDefault();
-            void onSend();
-          }}
-        >
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder='输入问题，Enter 发送，Shift+Enter 换行'
-            rows={2}
-            onKeyDown={(e) => {
-              // Enter 发送；Shift+Enter 留给换行
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                void onSend();
-              }
-            }}
-          />
-          {busy ? (
-            <button type='button' className='btn btn--stop' onClick={onStop}>
-              停止
-            </button>
-          ) : (
-            <button type='submit' className='btn' disabled={!input.trim()}>
-              发送
-            </button>
-          )}
-        </form>
-      </footer>
-        </>
       )}
     </div>
-  );
+  )
 }

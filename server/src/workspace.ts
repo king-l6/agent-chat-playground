@@ -3,14 +3,63 @@
  * 路径必须是相对路径，realpath 之后仍落在 root 内，防止 ../ 和符号链接逃出。
  */
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
+import { DATA_DIR, REPO_ROOT } from './paths.js'
 
 const MAX_BYTES = 256 * 1024
+const FILE = path.join(DATA_DIR, 'workspace.json')
 
 let root: string | null = null
 
+function restore() {
+  try {
+    const data = JSON.parse(fs.readFileSync(FILE, 'utf8')) as { root?: string }
+    if (typeof data.root === 'string' && fs.existsSync(data.root) && fs.statSync(data.root).isDirectory()) {
+      root = fs.realpathSync(data.root)
+    }
+  } catch {
+    /* 还没选过 */
+  }
+}
+
+restore()
+
 export function getWorkspaceRoot() {
   return root
+}
+
+export function suggestedHere() {
+  return REPO_ROOT
+}
+
+/** 选工作区之前用：列出磁盘上的子目录，不限于当前 root。 */
+export function browseDisk(abs?: string) {
+  const home = os.homedir()
+  const requested = (abs || '').trim() || home
+  if (!path.isAbsolute(requested)) throw new Error('路径必须是绝对路径')
+  const start = fs.realpathSync(requested)
+  if (!fs.statSync(start).isDirectory()) throw new Error('不是目录')
+  const parent = path.dirname(start)
+  const entries: Array<{ name: string; path: string }> = []
+  for (const entry of fs.readdirSync(start, { withFileTypes: true })) {
+    if (entry.name === '.' || entry.name === '..' || entry.name.startsWith('.')) continue
+    const full = path.join(start, entry.name)
+    try {
+      if (!fs.statSync(full).isDirectory()) continue
+    } catch {
+      continue
+    }
+    entries.push({ name: entry.name, path: full })
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name, 'zh'))
+  return {
+    cwd: start,
+    parent: parent !== start ? parent : null,
+    home,
+    here: REPO_ROOT,
+    entries,
+  }
 }
 
 export function setWorkspaceRoot(next: string) {
@@ -19,6 +68,8 @@ export function setWorkspaceRoot(next: string) {
     throw new Error('工作区必须是目录')
   }
   root = real
+  fs.mkdirSync(DATA_DIR, { recursive: true })
+  fs.writeFileSync(FILE, JSON.stringify({ root }, null, 2), 'utf8')
   return root
 }
 
@@ -35,6 +86,7 @@ export function resolveUnderRoot(relPath: string) {
     throw new Error('只允许工作区内的相对路径')
   }
   const requested = path.resolve(root, trimmed)
+  if (!isInside(root, requested)) throw new Error('路径超出工作区')
   try {
     const real = fs.realpathSync(requested)
     if (!isInside(root, real)) throw new Error('路径超出工作区')
@@ -42,9 +94,13 @@ export function resolveUnderRoot(relPath: string) {
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code
     if (code !== 'ENOENT') throw err
-    const parent = fs.realpathSync(path.dirname(requested))
-    if (!isInside(root, parent)) throw new Error('路径超出工作区')
-    return path.join(parent, path.basename(requested))
+    let ancestor = path.dirname(requested)
+    while (!fs.existsSync(ancestor) && ancestor !== path.dirname(ancestor)) {
+      ancestor = path.dirname(ancestor)
+    }
+    const realAncestor = fs.realpathSync(ancestor)
+    if (!isInside(root, realAncestor)) throw new Error('路径超出工作区')
+    return requested
   }
 }
 
@@ -81,6 +137,7 @@ export function workspaceWrite(relPath: string, content: string) {
   if (fs.existsSync(file) && !fs.statSync(file).isFile()) {
     throw new Error('目标不是文件')
   }
+  fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.writeFileSync(file, content, 'utf8')
   return { path: relPath.split(path.sep).join('/'), bytes }
 }

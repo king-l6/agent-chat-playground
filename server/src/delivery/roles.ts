@@ -3,8 +3,7 @@
  */
 import type { DeliveryRole } from './types.js'
 import { GateError } from './types.js'
-
-export const WRITE_ALLOWLIST = ['server/src/eval.ts', 'server/src/eval-cases.ts'] as const
+import { assertWritablePath } from './implement.js'
 
 const TOOLS: Record<DeliveryRole, readonly string[]> = {
   pm: ['search_notes', 'load_skill'],
@@ -30,9 +29,4 @@ export function assertRoleTool(role: DeliveryRole, name: string) {
   }
 }
 
-export function assertWritablePath(rel: string) {
-  const norm = rel.replace(/\\/g, '/').replace(/^\.\//, '')
-  if (!WRITE_ALLOWLIST.includes(norm as (typeof WRITE_ALLOWLIST)[number])) {
-    throw new GateError('write', `实现只能改白名单：${WRITE_ALLOWLIST.join('、')}，拒绝 ${norm}`)
-  }
-}
+export { assertWritablePath }

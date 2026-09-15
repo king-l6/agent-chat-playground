@@ -1,26 +1,25 @@
 /**
  * 交付控制面：人点闸，Agent 只写黑板。不要把角色人设塞进 agent.ts。
  */
-import { REPO_ROOT } from '../paths.js'
 import type { SseEvent } from '../types.js'
-import { gitDiff } from '../git.js'
+import { gitDiff, gitStatus } from '../git.js'
 import { executeTool } from '../tools.js'
-import { getWorkspaceRoot, setWorkspaceRoot, workspaceRead, workspaceWrite } from '../workspace.js'
+import { getWorkspaceRoot } from '../workspace.js'
 import { runAllowedCommand } from './commands.js'
+import { refinePrd } from './draft.js'
+import { implementPrd } from './implement.js'
 import { assertRoleTool, assertWritablePath } from './roles.js'
-import { getRun, saveRun, setSeat } from './store.js'
+import { getRun, resetRun, saveRun, setSeat } from './store.js'
 import {
   GateError,
-  type Acceptance,
   type DeliveryRole,
   type DeliveryRun,
   type GateAction,
   type Prd,
   type Seat,
+  type TalkTrace,
+  type TalkTraceStep,
 } from './types.js'
-
-const EXTRA_PATH = 'server/src/eval-cases.ts'
-const NEW_CASE_ID = 'vite-stack'
 
 type Send = (event: SseEvent) => void
 
@@ -37,12 +36,44 @@ function requireActor(run: DeliveryRun, actor: Seat, allowed: Seat[]) {
   }
 }
 
-function ensureRoot() {
-  if (!getWorkspaceRoot()) setWorkspaceRoot(REPO_ROOT)
+function requireWorkspace() {
+  const root = getWorkspaceRoot()
+  if (!root) {
+    throw new GateError(
+      'workspace',
+      '还没选仓库。上面工作区条或菜单「文件 → 打开工作区」选一个目录，研发和测试都在那个目录里干活。',
+    )
+  }
+  return root
+}
+
+function workspaceSnapshot() {
+  const root = getWorkspaceRoot()
+  if (!root) return { root: null, status: '', diff: '' }
+  try {
+    const status = gitStatus().status
+    const diff = gitDiff().diff
+    return { root, status, diff }
+  } catch (err) {
+    return {
+      root,
+      status: err instanceof Error ? err.message : String(err),
+      diff: '',
+    }
+  }
 }
 
 export function currentRun() {
   return getRun()
+}
+
+export function publicDelivery() {
+  const run = getRun()
+  return { ...run, workspace: workspaceSnapshot() }
+}
+
+export function startNewRun() {
+  return resetRun()
 }
 
 export function changeSeat(seat: Seat) {
@@ -188,63 +219,6 @@ export function applyGate(
   throw new GateError('gate', `未知闸门 ${action}`)
 }
 
-function defaultAcceptance(): Acceptance[] {
-  return [
-    {
-      id: 'ac-eval',
-      text: 'npm run eval:rag 退出码 0，原有 8 题还在',
-      kind: 'auto',
-      command: 'eval:rag',
-      checkedByPm: false,
-    },
-    {
-      id: 'ac-see',
-      text: '评测输出里能看到新增黄金问题',
-      kind: 'manual',
-      observable: '终端出现 9 条黄金问题，且 rerank 命中新增题',
-      checkedByPm: false,
-    },
-  ]
-}
-
-function draftFrom(message: string, prev: Prd): Prd {
-  const oneLiner = message.trim() || prev.oneLiner || '给 RAG 评测加一道题'
-  const base = prev.acceptance.length ? prev.acceptance : defaultAcceptance()
-  return {
-    ...prev,
-    oneLiner,
-    title: prev.title || '给 RAG 评测加一道黄金问题',
-    body:
-      prev.body ||
-      `一句话：${oneLiner}\n范围：只改 server/src/eval-cases.ts（或 eval.ts）。禁止改 agent.ts。\n做完后 npm run eval:rag 不能坏原有 8 题。`,
-    acceptance: base,
-    confirmed: false,
-    version: prev.version + 1,
-  }
-}
-
-function withNewCase(existing: string) {
-  if (existing.includes(NEW_CASE_ID)) return existing
-  const row = `  {
-    id: '${NEW_CASE_ID}',
-    query: 'agent-chat-playground 的技术栈是什么？',
-    docId: 'project',
-    contains: 'Vite',
-  },`
-  if (existing.includes('export const EXTRA_CASES: GoldCase[] = []')) {
-    return existing.replace(
-      'export const EXTRA_CASES: GoldCase[] = []',
-      `export const EXTRA_CASES: GoldCase[] = [\n${row}\n]`,
-    )
-  }
-  if (existing.includes('export const EXTRA_CASES: GoldCase[] = [')) {
-    return existing.replace(
-      'export const EXTRA_CASES: GoldCase[] = [',
-      `export const EXTRA_CASES: GoldCase[] = [\n${row}`,
-    )
-  }
-  throw new GateError('write', 'eval-cases.ts 找不到 EXTRA_CASES，拒绝盲写')
-}
 
 export function deliveryExecuteTool(role: DeliveryRole, name: string, rawArgs: string) {
   assertRoleTool(role, name)
@@ -254,38 +228,78 @@ export function deliveryExecuteTool(role: DeliveryRole, name: string, rawArgs: s
   }
   if (name === 'run_allowed_command') {
     const args = JSON.parse(rawArgs || '{}') as { command?: string }
-    ensureRoot()
-    return JSON.stringify(runAllowedCommand(String(args.command ?? ''), getWorkspaceRoot() || REPO_ROOT))
+    return JSON.stringify(runAllowedCommand(String(args.command ?? ''), requireWorkspace()))
   }
   return executeTool(name, rawArgs)
 }
 
-function emitRole(send: Send, role: DeliveryRole, run: DeliveryRun, name: string) {
-  send({ type: 'role_start', role })
-  send({ type: 'artifact', name, payload: artifactPayload(name, run) })
-  send({ type: 'role_done', role })
+function remember(run: DeliveryRun, user: string, assistant: string, trace?: TalkTrace) {
+  run.talk.push({ role: 'user', content: user })
+  run.talk.push({ role: 'assistant', content: assistant, ...(trace ? { trace } : {}) })
 }
 
-function artifactPayload(name: string, run: DeliveryRun) {
-  if (name === 'prd') return run.prd
-  if (name === 'patch') return run.patch
-  if (name === 'review') return run.review
-  if (name === 'test_report') return run.test_report
-  if (name === 'release_notes') return run.release_notes
-  return run
+function tapTrace(send: Send) {
+  const steps = new Map<string, TalkTraceStep>()
+  let live = ''
+  return {
+    send(event: SseEvent) {
+      if (event.type === 'tool_start') {
+        steps.set(event.id, {
+          id: event.id,
+          name: event.name,
+          arguments: event.arguments,
+          status: 'running',
+        })
+      }
+      if (event.type === 'tool_result') {
+        const prev = steps.get(event.id)
+        steps.set(event.id, {
+          id: event.id,
+          name: event.name,
+          arguments: prev?.arguments ?? '',
+          status: 'done',
+          result: event.result,
+        })
+      }
+      if (event.type === 'tool_error') {
+        const prev = steps.get(event.id)
+        steps.set(event.id, {
+          id: event.id,
+          name: event.name,
+          arguments: prev?.arguments ?? '',
+          status: 'error',
+          error: event.error,
+        })
+      }
+      if (event.type === 'text_delta' && event.delta && event.delta !== '…') {
+        live = `${live}${event.delta}`.slice(-4000)
+      }
+      send(event)
+    },
+    snapshot(): TalkTrace | undefined {
+      const list = Array.from(steps.values())
+      if (list.length === 0 && !live) return undefined
+      return { steps: list, live: live || undefined }
+    },
+  }
 }
 
 export async function runDeliveryTurn(actor: Seat, message: string, send: Send) {
   const run = getRun()
   requireActor(run, actor, [actor])
-  send({ type: 'meta', mode: 'mock' })
+  const text = message.trim()
 
   if (run.phase === 'drafting') {
     requireActor(run, actor, ['pm'])
-    run.prd = draftFrom(message, run.prd)
+    send({ type: 'role_start', role: 'pm' })
+    const refined = await refinePrd(run.prd, run.talk, text)
+    send({ type: 'meta', mode: refined.live ? 'live' : 'mock' })
+    run.prd = refined.prd
+    remember(run, text, refined.reply)
     saveRun(run)
-    emitRole(send, 'pm', run, 'prd')
-    send({ type: 'text_delta', delta: '已起草 PRD。勾至少 1 条验收后点「确认流转」。' })
+    send({ type: 'artifact', name: 'prd', payload: run.prd })
+    send({ type: 'role_done', role: 'pm' })
+    send({ type: 'text_delta', delta: refined.reply })
     send({ type: 'done' })
     return
   }
@@ -294,7 +308,7 @@ export async function runDeliveryTurn(actor: Seat, message: string, send: Send) 
     send({
       type: 'gate_blocked',
       gate: 'blocked_on_pm',
-      message: '文档仍冻结。产品撤回改文档，或维持原文档再转研发。',
+      message: '研发把问题打回来了，文档还冻着。要改需求先「撤回确认」；认可原文就「维持原文档再转研发」。',
     })
     send({ type: 'done' })
     return
@@ -302,68 +316,87 @@ export async function runDeliveryTurn(actor: Seat, message: string, send: Send) 
 
   if (run.phase === 'developing') {
     requireActor(run, actor, ['dev'])
-    if (!run.prd.confirmed) throw new GateError('frozen', 'PRD 未确认，不能进研发')
-    if (run.stale) throw new GateError('stale', 'run 已过期，重新确认后再改代码')
-    ensureRoot()
+    if (!run.prd.confirmed) throw new GateError('frozen', 'PRD 未确认，不能在仓库里改代码')
+    if (run.stale) throw new GateError('stale', '这次已经撤回过，run 过期了。重新确认后再改仓库。')
+    const root = requireWorkspace()
     send({ type: 'role_start', role: 'dev' })
-    const before = workspaceRead(EXTRA_PATH)
-    await deliveryExecuteTool(
-      'dev',
-      'workspace_write',
-      JSON.stringify({ path: EXTRA_PATH, content: withNewCase(before) }),
+    const tap = tapTrace(send)
+    tap.send({ type: 'text_delta', delta: '开始按文档改仓库。\n' })
+    const done = await implementPrd(
+      run.prd,
+      text,
+      {
+        note: (line) => tap.send({ type: 'text_delta', delta: line }),
+        start: (id, name, args) => tap.send({ type: 'tool_start', id, name, arguments: args }),
+        done: (id, name, result) => tap.send({ type: 'tool_result', id, name, result }),
+        fail: (id, name, error) => tap.send({ type: 'tool_error', id, name, error }),
+      },
+      { talk: run.talk, lastErrors: run.lastErrors ?? [] },
     )
+    send({ type: 'meta', mode: done.live ? 'live' : 'mock' })
+    const snap = workspaceSnapshot()
+    const files = [...new Set([...(run.patch?.files ?? []), ...done.files])]
+    const diff = files
+      .map((file) => gitDiff(file).diff)
+      .filter((d) => d && d !== '(与 HEAD 无差异)')
+      .join('\n\n')
+    run.lastErrors = done.errors
     run.patch = {
-      summary: `追加黄金题 ${NEW_CASE_ID}`,
-      files: [EXTRA_PATH],
+      summary: text || `按 PRD 改 ${root}`,
+      files,
+      status: snap.status,
+      diff: diff || snap.diff,
     }
+    remember(run, text || '按右边文档改选中的仓库', done.reply, tap.snapshot())
     saveRun(run)
     send({ type: 'artifact', name: 'patch', payload: run.patch })
     send({ type: 'role_done', role: 'dev' })
-    send({ type: 'text_delta', delta: `已写入 ${EXTRA_PATH}。人点「开发完成」才进评审。` })
+    send({ type: 'text_delta', delta: run.talk[run.talk.length - 1]?.content ?? '' })
     send({ type: 'done' })
     return
   }
 
   if (run.phase === 'reviewing') {
     requireActor(run, actor, ['qa'])
-    ensureRoot()
+    requireWorkspace()
+    send({ type: 'meta', mode: 'mock' })
     send({ type: 'role_start', role: 'review' })
-    let path = EXTRA_PATH
-    let fromDiff = false
-    try {
-      const diff = gitDiff(EXTRA_PATH)
-      const first = diff.diff.split('\n').find((line) => line.startsWith('+++ b/'))
-      if (first) {
-        path = first.replace('+++ b/', '').trim() || EXTRA_PATH
-        fromDiff = true
-      }
-    } catch {
-      /* mock 也必须带路径 */
-    }
+    const diff = gitDiff()
+    const files = [
+      ...new Set(
+        (diff.diff.match(/^\+\+\+ b\/.+$/gm) ?? []).map((line) => line.replace('+++ b/', '').trim()),
+      ),
+    ]
+    const path = run.patch?.files[0] || files[0] || '(未写文件)'
+    const extra = files.filter((f) => f !== path)
     run.review = {
       comments: [
         {
           path,
-          risk: fromDiff
-            ? '只加了一道题，确认没有改 agent.ts / 原 8 题。'
-            : '工作区没有 diff，按约定路径评审（mock 也要有 path）。',
+          risk:
+            diff.diff && diff.diff !== '(与 HEAD 无差异)'
+              ? extra.length
+                ? `这轮交付改的是 ${run.patch?.files.join(', ') || path}。工作区里还有其它改动：${extra.slice(0, 6).join(', ')}${extra.length > 6 ? '…' : ''}。`
+                : `对照工作区 diff：${path}。`
+              : '工作区相对 HEAD 没有 diff。若文件已提交，先看 git status。',
           mustFix: false,
         },
       ],
     }
+    remember(run, text || '对照仓库 diff 出评审', `意见指向 ${path}。人点放行或打回。`)
     saveRun(run)
     send({ type: 'artifact', name: 'review', payload: run.review })
     send({ type: 'role_done', role: 'review' })
-    send({ type: 'text_delta', delta: `评审意见指向 ${path}。人点放行或打回。` })
+    send({ type: 'text_delta', delta: run.talk[run.talk.length - 1]?.content ?? '' })
     send({ type: 'done' })
     return
   }
 
   if (run.phase === 'testing') {
     requireActor(run, actor, ['qa'])
-    ensureRoot()
+    const cwd = requireWorkspace()
+    send({ type: 'meta', mode: 'mock' })
     send({ type: 'role_start', role: 'qa' })
-    const cwd = getWorkspaceRoot() || REPO_ROOT
     const items = []
     const commandLogs = []
     for (const ac of run.prd.acceptance) {
@@ -374,7 +407,7 @@ export async function runDeliveryTurn(actor: Seat, message: string, send: Send) 
         items.push({
           acId: ac.id,
           result: log.exitCode === 0 ? 'pass' : 'fail',
-          detail: `exit=${log.exitCode}\n${log.excerpt}`,
+          detail: `在 ${cwd} 跑 ${log.command}，exit=${log.exitCode}\n${log.excerpt}`,
         } as const)
       } else {
         items.push({
@@ -385,10 +418,17 @@ export async function runDeliveryTurn(actor: Seat, message: string, send: Send) 
       }
     }
     run.test_report = { items, commandLogs }
+    remember(
+      run,
+      text || '在选中的仓库跑验收',
+      commandLogs.length
+        ? `已在 ${cwd} 跑 ${commandLogs.map((l) => `${l.command}→${l.exitCode}`).join('，')}。看右边输出再签字。`
+        : '没有已勾的自动验收。勾过的人工项需要你自己看。',
+    )
     saveRun(run)
     send({ type: 'artifact', name: 'test_report', payload: run.test_report })
     send({ type: 'role_done', role: 'qa' })
-    send({ type: 'text_delta', delta: '测试对照已勾验收。人签字后才出发布说明。' })
+    send({ type: 'text_delta', delta: run.talk[run.talk.length - 1]?.content ?? '' })
     send({ type: 'done' })
     return
   }
@@ -396,7 +436,7 @@ export async function runDeliveryTurn(actor: Seat, message: string, send: Send) 
   send({
     type: 'gate_blocked',
     gate: run.phase,
-    message: '这条 run 已结束。要再来一回请新产品从一句话重新起草。',
+    message: '这条已经签过字。要再来一回，点「新开一条需求」。',
   })
   send({ type: 'done' })
 }

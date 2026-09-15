@@ -112,6 +112,135 @@ a.badge {
   color: #94a3b8;
 }
 
+.wsbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.wsbar__form {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.wspick {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(28, 25, 20, 0.45);
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.wspick__panel {
+  width: min(36rem, 100%);
+  max-height: min(32rem, 86vh);
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  background: #f3ead8;
+  color: #241f1a;
+  border: 1px solid #c9bfae;
+  padding: 0.85rem 0.95rem 0.95rem;
+}
+
+.wspick__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.wspick__head strong {
+  font-family: Palatino, 'Songti SC', 'STSong', serif;
+  font-size: 1.05rem;
+}
+
+.wspick__x,
+.wspick__jumps button,
+.wspick__ok {
+  border: 1px solid #241f1a;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 650;
+  padding: 0.28rem 0.65rem;
+  cursor: pointer;
+}
+
+.wspick__cwd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  color: #5c554a;
+  word-break: break-all;
+}
+
+.wspick__jumps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.wspick__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  border: 1px solid #c9bfae;
+  background: #f7f1e4;
+}
+
+.wspick__list button {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid #e4ddd0;
+  background: transparent;
+  padding: 0.45rem 0.65rem;
+  font: inherit;
+  font-size: 0.84rem;
+  cursor: pointer;
+}
+
+.wspick__list button:hover,
+.wspick__list button:focus-visible {
+  background: #efe1b8;
+}
+
+.wspick__ok {
+  background: #1f4d3a;
+  color: #f4efe4;
+}
+
+.wsbar__form input {
+  min-width: 14rem;
+  max-width: 28rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  padding: 0.28rem 0.7rem;
+  font: inherit;
+  font-size: 0.78rem;
+  background: #fff;
+}
+
+.wsbar__form button {
+  flex-shrink: 0;
+  border: 1px solid #86efac;
+  background: #fff;
+  color: #047857;
+  font-weight: 650;
+  font-size: 0.78rem;
+  border-radius: 999px;
+  padding: 0.28rem 0.75rem;
+  cursor: pointer;
+}
+
 .brand {
   font-weight: 750;
   font-size: 1.05rem;
@@ -146,6 +275,53 @@ a.badge {
   color: #b45309;
 }
 
+.app--dock {
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app__stage {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.15fr);
+}
+
+.app__stage--solo {
+  grid-template-columns: 1fr;
+}
+
+.app__talk {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  background: transparent;
+}
+
+.app__side {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+.app__side > .kb,
+.app__side > .vd,
+.app__side > .wf,
+.app__side > .settings {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.app__side > .vd,
+.app__side > .wf {
+  overflow: hidden;
+}
+
 .app--kb {
   grid-template-rows: auto 1fr;
   height: 100vh;
@@ -165,6 +341,91 @@ a.badge {
 .app--kb > .wf {
   min-height: 0;
   overflow: hidden;
+}
+
+.app--kb > .desk {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app--desk {
+  background: #1c1914;
+}
+
+.app--desk .topbar {
+  background: #241f1a;
+  color: #efe8d8;
+  padding: 0.45rem 0.8rem 0.35rem;
+}
+
+.app--desk .sub {
+  display: none;
+}
+
+.app--desk .brand {
+  color: #efe8d8;
+}
+
+.app--desk .nav {
+  background: #2f2922;
+}
+
+.app--desk .nav__link {
+  color: #b7ad9c;
+}
+
+.app--desk .nav__link--on {
+  background: #efe8d8;
+  color: #241f1a;
+  box-shadow: none;
+}
+
+.app--desk .wsbar {
+  padding: 0.28rem 0.8rem;
+  background: #2a241c;
+  border-bottom-color: #3d3429;
+  color: #cfc4b0;
+}
+
+.app--desk .wsbar__full {
+  display: none;
+}
+
+.app--desk .wsbar--on {
+  background: #243328;
+  border-bottom-color: #355243;
+  color: #d7e7d6;
+}
+
+.app--desk .wsbar__empty,
+.app--desk .wsbar__hint,
+.app--desk .wsbar__full {
+  color: #9a8f7d;
+}
+
+.app--desk .wsbar__btn,
+.app--desk .wsbar__form button,
+.app--desk .wsbar__actions .wsbar__btn {
+  border-color: #6b8f74;
+  background: #efe8d8;
+  color: #1f4d3a;
+}
+
+.app--desk .wsbar__form input {
+  border: 1px solid #6b5f4e;
+  background: #1c1914;
+  color: #efe8d8;
+  border-radius: 0;
+  padding: 0.28rem 0.5rem;
+  font: inherit;
+  font-size: 0.78rem;
+  min-width: 16rem;
+}
+
+.app--desk .badge {
+  background: #1c1914;
+  border-color: #6b5f4e;
+  color: #efe8d8;
 }
 
 .nav {
@@ -307,6 +568,18 @@ a.badge {
   color: #b91c1c;
   border: 1px solid #fecaca;
   font-size: 0.88rem;
+}
+
+@media (max-width: 900px) {
+  .app--split .app__stage {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(220px, 1fr) minmax(240px, 1fr);
+  }
+
+  .app__side {
+    border-left: 0;
+    border-top: 1px solid #e2e8f0;
+  }
 }
 
 @media (max-width: 640px) {

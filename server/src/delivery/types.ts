@@ -30,7 +30,25 @@ export type Prd = {
   version: number
 }
 
-export type Patch = { summary: string; files: string[] }
+export type TalkTraceStep = {
+  id: string
+  name: string
+  arguments: string
+  status: 'running' | 'done' | 'error'
+  result?: string
+  error?: string
+}
+
+export type TalkTrace = { steps: TalkTraceStep[]; live?: string }
+
+export type TalkTurn = { role: 'user' | 'assistant'; content: string; trace?: TalkTrace }
+
+export type Patch = {
+  summary: string
+  files: string[]
+  status?: string
+  diff?: string
+}
 export type ReviewComment = { path: string; risk: string; mustFix: boolean }
 export type Review = { comments: ReviewComment[]; riskReason?: string }
 export type TestItem = { acId: string; result: AcResult; detail: string }
@@ -73,6 +91,8 @@ export type DeliveryRun = {
   test_report?: TestReport
   release_notes?: ReleaseNotes
   questions: string[]
+  talk: TalkTurn[]
+  lastErrors?: string[]
   gates: GateEvent[]
 }
 

@@ -21,6 +21,19 @@ export type Acceptance = {
   checkedByPm: boolean
 }
 
+export type TalkTraceStep = {
+  id: string
+  name: string
+  arguments: string
+  status: 'running' | 'done' | 'error'
+  result?: string
+  error?: string
+}
+
+export type TalkTrace = { steps: TalkTraceStep[]; live?: string }
+
+export type TalkTurn = { role: 'user' | 'assistant'; content: string; trace?: TalkTrace }
+
 export type DeliveryRun = {
   id: string
   seat: Seat
@@ -36,7 +49,7 @@ export type DeliveryRun = {
     confirmedAt?: string
     version: number
   }
-  patch?: { summary: string; files: string[] }
+  patch?: { summary: string; files: string[]; status?: string; diff?: string }
   review?: { comments: Array<{ path: string; risk: string; mustFix: boolean }>; riskReason?: string }
   test_report?: {
     items: Array<{ acId: string; result: string; detail: string }>
@@ -45,6 +58,9 @@ export type DeliveryRun = {
   }
   release_notes?: { text: string; files: string[] }
   questions: string[]
+  talk: TalkTurn[]
+  lastErrors?: string[]
+  workspace?: { root: string | null; status: string; diff: string }
   gates: Array<{ action: string; actor: Seat; at: string; reason?: string }>
 }
 
@@ -95,18 +111,26 @@ export async function postGate(
   }
 }
 
+export async function resetDelivery() {
+  const { data } = await axios.post<DeliveryRun>(`${API_BASE}/api/delivery/reset`)
+  return data
+}
+
 export async function streamDeliveryTurn(options: {
   actor: Seat
   message: string
   onEvent: (event: SseEvent) => void
 }) {
-  const res = await axios.post(
-    `${API_BASE}/api/delivery/turn`,
-    { actor: options.actor, message: options.message },
-    { adapter: 'fetch', responseType: 'stream', headers: { 'Content-Type': 'application/json' } },
-  )
-  const stream = res.data as ReadableStream<Uint8Array>
-  const reader = stream.getReader()
+  const res = await fetch(`${API_BASE}/api/delivery/turn`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    body: JSON.stringify({ actor: options.actor, message: options.message }),
+  })
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => '')
+    throw new Error(text || `研发回合失败 HTTP ${res.status}`)
+  }
+  const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
   while (true) {

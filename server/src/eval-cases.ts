@@ -18,6 +18,18 @@ const GOLD_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 /** 交付竖切往这里追加，不要改 gold.json 里原来的 8 题 */
 export const EXTRA_CASES: GoldCase[] = [
   {
+    id: 'delivery-run-mtygs66j',
+    query: "给我搞一个一键生成美女图片的功能",
+    docId: 'project',
+    contains: 'Vite',
+  },
+  {
+    id: 'delivery-run-mtydqrst',
+    query: "搞一个热点库需求",
+    docId: 'project',
+    contains: 'Vite',
+  },
+  {
     id: 'vite-stack',
     query: 'agent-chat-playground 的技术栈是什么？',
     docId: 'project',

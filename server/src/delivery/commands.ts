@@ -19,7 +19,7 @@ export function runAllowedCommand(command: string, cwd: string) {
     timeout: 180_000,
     shell: false,
   })
-  const excerpt = `${result.stdout || ''}\n${result.stderr || ''}`.trim().slice(-800)
+  const excerpt = `${result.stdout || ''}\n${result.stderr || ''}`.trim().slice(-4000)
   return {
     command,
     exitCode: result.status ?? 1,

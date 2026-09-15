@@ -140,8 +140,55 @@ export type SkillMeta = {
 
 /** 当前 Agent 能碰的磁盘根目录；没选过是 null */
 export async function fetchWorkspace() {
-  const { data } = await axios.get<{ root: string | null }>(`${API_BASE}/api/workspace`);
+  const { data } = await axios.get<{ root: string | null; here?: string }>(`${API_BASE}/api/workspace`);
   return data.root;
+}
+
+export async function fetchWorkspaceInfo() {
+  const { data } = await axios.get<{ root: string | null; here: string }>(`${API_BASE}/api/workspace`)
+  return data
+}
+
+export type WorkspaceBrowse = {
+  cwd: string
+  parent: string | null
+  home: string
+  here: string
+  entries: Array<{ name: string; path: string }>
+}
+
+export async function browseWorkspace(dir?: string) {
+  try {
+    const { data } = await axios.get<WorkspaceBrowse>(`${API_BASE}/api/workspace/browse`, {
+      params: dir ? { dir } : undefined,
+    })
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+export async function setWorkspace(root: string) {
+  try {
+    const { data } = await axios.post<{ ok: boolean; root: string }>(`${API_BASE}/api/workspace`, {
+      root,
+    })
+    return data.root
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+export function notifyWorkspaceChanged(root: string | null) {
+  window.dispatchEvent(new CustomEvent('workspace-changed', { detail: root }))
 }
 
 export type LlmSettingsPublic = {

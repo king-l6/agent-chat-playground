@@ -2,10 +2,30 @@
  * 消息列表：渲染用户/助手气泡，以及中间的工具卡片
  */
 import ReactMarkdown from 'react-markdown'
-import type { UiMessage } from '../types'
+import type { ToolCallView, UiMessage } from '../types'
 import { CitationMarkdown } from './CitationMarkdown'
 import { ToolCard } from './ToolCard'
 import './MessageList.css'
+
+function MessageProcess({ tools, streaming }: { tools: ToolCallView[]; streaming: boolean }) {
+  if (!tools.length) return null
+  const running = streaming || tools.some((t) => t.status === 'running')
+  const cards = tools.map((tool) => <ToolCard key={tool.id} tool={tool} />)
+  if (running) {
+    return (
+      <div className="msg__process msg__process--on">
+        <p className="msg__process-head">正在执行</p>
+        {cards}
+      </div>
+    )
+  }
+  return (
+    <details className="msg__process">
+      <summary>中间步骤 · {tools.length}</summary>
+      {cards}
+    </details>
+  )
+}
 
 /** 接收整个 messages 数组，按条画文章气泡 */
 export function MessageList({ messages }: { messages: UiMessage[] }) {
@@ -31,10 +51,7 @@ export function MessageList({ messages }: { messages: UiMessage[] }) {
           {/* 角色标签 */}
           <div className="msg__role">{m.role === 'user' ? '你' : '助手'}</div>
 
-          {/* 工具卡片画在正文前面，方便先看到「调了啥」再看回答 */}
-          {m.tools.map((tool) => (
-            <ToolCard key={tool.id} tool={tool} />
-          ))}
+          <MessageProcess tools={m.tools} streaming={m.status === 'streaming'} />
 
           {m.content ? (
             <div className="msg__content">

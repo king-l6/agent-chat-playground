@@ -7,7 +7,7 @@ const FILE = path.join(DATA_DIR, 'delivery.json')
 
 function emptyRun(): DeliveryRun {
   return {
-    id: 'run-1',
+    id: `run-${Date.now().toString(36)}`,
     seat: 'pm',
     phase: 'drafting',
     stale: false,
@@ -21,6 +21,8 @@ function emptyRun(): DeliveryRun {
       version: 1,
     },
     questions: [],
+    talk: [],
+    lastErrors: [],
     gates: [],
   }
 }
@@ -31,6 +33,8 @@ export function getRun(): DeliveryRun {
   if (cached) return cached
   try {
     cached = JSON.parse(fs.readFileSync(FILE, 'utf8')) as DeliveryRun
+    if (!Array.isArray(cached.talk)) cached.talk = []
+    if (!Array.isArray(cached.lastErrors)) cached.lastErrors = []
     return cached
   } catch {
     cached = emptyRun()

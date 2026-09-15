@@ -30,6 +30,32 @@
   margin-bottom: 0.35rem;
 }
 
+.msg__process {
+  margin: 0.35rem 0 0.65rem;
+  padding: 0.4rem 0.55rem 0.5rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.msg__process--on {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.msg__process-head,
+.msg__process summary {
+  margin: 0 0 0.3rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.msg__process summary::-webkit-details-marker {
+  display: none;
+}
+
 .msg__content {
   line-height: 1.65;
   color: #0f172a;
