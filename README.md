@@ -63,6 +63,8 @@ npm run dev
 
 Live：打开 `#/settings` 填自己的 API Key / Base URL / 模型，或切回 MOCK。网页和桌面同一页。也可以继续用 `.env` 的 `ANTHROPIC_*` / `OPENAI_*`。Embedding 走本地模型，不要把 chat 接口当成 `/embeddings`。
 
+公司 HTTP MCP（Claude Code 里那套）：`#/settings` 点「从 Claude 导入」，或自己填 URL + Cookie。连上后对话页会把 `tools/list` 转成 function calling。要 VPN；Cookie 只写本机数据目录。交付页不会调 MCP。
+
 安装包（别人不用装 Node）：
 
 ```bash
@@ -93,6 +95,7 @@ xattr -cr "/Applications/Agent Chat Playground.app"
 - 确认后不能悄悄改文档；撤回不会自动 git checkout
 - 无理由不能跳过评审或测试
 - 不是分布式向量库；画布分流是正则；图画在 localStorage
+- MCP 要本机填 URL/Cookie（或从 Claude 导入），安装包里不带公司凭证；交付泳道不调 MCP
 
 ## 目录
 
@@ -105,6 +108,7 @@ electron/             桌面壳：主进程加载 Vite；文件菜单打开工�
 server/src/
   index.ts            Express：SSE / 知识库 / 跑图
   agent.ts            Agent 循环
+  mcp.ts              HTTP MCP 客户端：list → function calling
   skills.ts           扫描 SKILL.md，供 load_skill 读取
   retrieve.ts         hybrid + rerank + 邻接扩展
   workflow.ts         画布执行器（search / calc / answer）

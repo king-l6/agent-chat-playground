@@ -85,7 +85,24 @@
   cursor: pointer;
 }
 
-.settings__save:disabled {
+.settings__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.settings__secondary {
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 0.6rem 1.1rem;
+  background: #fff;
+  color: #334155;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.settings__save:disabled,
+.settings__secondary:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }

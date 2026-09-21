@@ -198,6 +198,15 @@ export type LlmSettingsPublic = {
   model: string
 }
 
+export type McpPublic = {
+  enabled: boolean
+  connected: boolean
+  url: string
+  hasAuth: boolean
+  tools: string[]
+  error: string | null
+}
+
 export async function fetchSettings() {
   const { data } = await axios.get<LlmSettingsPublic>(`${API_BASE}/api/settings`)
   return data
@@ -221,6 +230,37 @@ export async function saveSettings(body: {
   }
 }
 
+export async function fetchMcp() {
+  const { data } = await axios.get<McpPublic>(`${API_BASE}/api/mcp`)
+  return data
+}
+
+export async function saveMcp(body: { enabled: boolean; url?: string; auth?: string }) {
+  try {
+    const { data } = await axios.put<McpPublic>(`${API_BASE}/api/mcp`, body)
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+export async function importClaudeMcp() {
+  try {
+    const { data } = await axios.post<McpPublic>(`${API_BASE}/api/mcp/import-claude`)
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
 export async function fetchHealth() {
   const { data } = await axios.get<{
     ok: boolean
@@ -228,6 +268,7 @@ export async function fetchHealth() {
     model?: string
     rag?: RagStatus
     skills?: SkillMeta[]
+    mcp?: McpPublic
   }>(`${API_BASE}/api/health`);
   return data;
 }

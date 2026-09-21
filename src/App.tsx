@@ -4,7 +4,7 @@
  * - 调 streamChat，把 SSE 事件落到某一条助手消息上
  */
 import { useEffect, useRef, useState } from 'react';
-import { streamChat, toApiMessages, fetchHealth, type RagStatus, type SkillMeta } from './api/chat';
+import { streamChat, toApiMessages, fetchHealth, type RagStatus, type SkillMeta, type McpPublic } from './api/chat';
 import type { SseEvent, UiMessage } from './types';
 import { MessageList } from './components/MessageList';
 import { DocumentsPage } from './components/DocumentsPage';
@@ -42,6 +42,7 @@ export default function App() {
   const [model, setModel] = useState<string>('');
   const [rag, setRag] = useState<RagStatus | null>(null);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
+  const [mcp, setMcp] = useState<McpPublic | null>(null);
   const [page, setPage] = useState<
     'chat' | 'documents' | 'vectors' | 'canvas' | 'settings' | 'delivery'
   >(pageFromHash);
@@ -66,6 +67,7 @@ export default function App() {
         setModel(data.model || '');
         if (data.rag) setRag(data.rag);
         if (data.skills) setSkills(data.skills);
+        if (data.mcp) setMcp(data.mcp);
       })
       .catch(() => setMode('unknown'));
   }, []);
@@ -236,7 +238,7 @@ export default function App() {
   const talk = (
     <div className="app__talk">
       <main className="main">
-        {(rag || skills.length > 0) && (
+        {(rag || skills.length > 0 || mcp?.connected || mcp?.error) && (
           <p className="rag-hint">
             {rag && (
               <a href="#/vectors">
@@ -247,6 +249,11 @@ export default function App() {
             {skills.length > 0
               ? `${rag ? ' · ' : ''}已连接 skill：${skills.map((s) => s.name).join(', ')}`
               : ''}
+            {mcp?.connected
+              ? `${rag || skills.length > 0 ? ' · ' : ''}MCP ${mcp.tools.length} 个工具`
+              : mcp?.enabled && mcp.error
+                ? `${rag || skills.length > 0 ? ' · ' : ''}MCP 未连上`
+                : ''}
           </p>
         )}
         <MessageList messages={messages} />
@@ -379,6 +386,7 @@ export default function App() {
                     setMode(next.mode)
                     setModel(next.model)
                   }}
+                  onMcpSaved={(next) => setMcp(next)}
                 />
               )}
             </div>

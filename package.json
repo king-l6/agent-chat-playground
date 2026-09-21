@@ -18,10 +18,12 @@
     "pack:app": "npm run electron:compile && tsc -p tsconfig.server.json && ELECTRON_BUILD=1 VITE_API_BASE=http://127.0.0.1:8790 vite build",
     "dist": "npm run pack:app && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --publish never",
     "eval:rag": "tsx server/src/eval.ts",
+    "crawl:wework": "tsx server/scripts/wework-crawler.ts",
     "lint": "oxlint"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/client": "^2.0.0",
     "@xyflow/react": "^12.11.6",
     "axios": "^1.19.0",
     "cors": "^2.8.6",
@@ -41,12 +43,15 @@
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@types/turndown": "^5.0.6",
     "@vitejs/plugin-react": "^6.0.4",
     "concurrently": "^10.0.4",
     "electron": "^44.3.0",
     "electron-builder": "^26.15.3",
     "oxlint": "^1.75.0",
+    "playwright": "^1.63.0",
     "tsx": "^4.23.5",
+    "turndown": "^7.2.4",
     "typescript": "~6.0.2",
     "vite": "^8.2.0",
     "wait-on": "^9.1.0"

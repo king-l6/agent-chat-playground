@@ -35,12 +35,18 @@ function parseArgs(argv: string[]) {
   return { sweep, maxChars, overlap, topK }
 }
 
-function hit(c: GoldCase, hits: Hit[]) {
+/**
+ * 正确答案在 hits 里的排名(1-based);没命中返回 0。
+ * Recall 只看「在不在 TopK」,rank 还能看出「排第几」——rerank 的价值全在这。
+ */
+function firstHitRank(c: GoldCase, hits: Hit[]): number {
   const needle = c.contains.toLowerCase()
-  return hits.some((h) => {
-    if (h.docId !== c.docId) return false
-    return `${h.title}\n${h.text}`.toLowerCase().includes(needle)
-  })
+  for (let i = 0; i < hits.length; i += 1) {
+    const h = hits[i]
+    if (h.docId !== c.docId) continue
+    if (`${h.title}\n${h.text}`.toLowerCase().includes(needle)) return i + 1
+  }
+  return 0
 }
 
 async function scoreCases(
@@ -50,11 +56,14 @@ async function scoreCases(
   hitsOf: (c: GoldCase) => Promise<Hit[]>,
 ) {
   let ok = 0
+  let rrSum = 0 // reciprocal rank 累加,除以题数就是 MRR
   const misses: string[] = []
   for (const c of gold.cases) {
     const hits = await hitsOf(c)
-    if (hit(c, hits)) {
+    const rank = firstHitRank(c, hits)
+    if (rank > 0) {
       ok += 1
+      rrSum += 1 / rank // 命中第 1 名 → 1.0,第 2 名 → 0.5,第 3 名 → 0.33
       continue
     }
     const top = hits[0]
@@ -65,11 +74,12 @@ async function scoreCases(
     )
   }
   const recall = ok / gold.cases.length
+  const mrr = rrSum / gold.cases.length
   console.log(
-    `[eval] ${label} Recall@${topK} = ${ok}/${gold.cases.length} = ${(recall * 100).toFixed(0)}%`,
+    `[eval] ${label} Recall@${topK} = ${ok}/${gold.cases.length} = ${(recall * 100).toFixed(0)}%  MRR@${topK} = ${mrr.toFixed(3)}`,
   )
   if (misses.length) console.log(misses.join('\n'))
-  return { ok, total: gold.cases.length, recall }
+  return { ok, total: gold.cases.length, recall, mrr }
 }
 
 async function embedConfig(maxChars: number, overlap: number) {

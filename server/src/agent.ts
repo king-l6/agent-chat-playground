@@ -10,7 +10,8 @@ import type {
 } from 'openai/resources/chat/completions';
 import { resolveLlmFromSettings } from './settings.js';
 import { skillsCatalogText } from './skills.js';
-import { executeTool, toolDefinitions } from './tools.js';
+import { mcpInstructions, mcpToolDefinitions } from './mcp.js';
+import { executeTool, getToolDefinitions } from './tools.js';
 import type { ChatMessageInput, SseEvent } from './types.js';
 
 /**
@@ -40,7 +41,16 @@ ${skillsCatalogText()}
 用户任务匹配某条 description 时，先 load_skill(name)，再按返回的 body 执行。同一 skill 每轮最多一次。若 history 里已经有该 skill 的 load_skill 结果，直接按 body 执行，不要再 load。问时间、算术、掷骰子不要 load_skill。
 9. 用户要读/写/列出已选工作区里的文件时，调用 workspace_read / workspace_write / workspace_list。path 只用相对路径（如 README.md）。读项目说明、SSE、简历缺口仍优先 search_notes，不要用工作区代替知识库。
 10. 用户问当前改了什么、未提交、diff 时，先 git_status，需要看具体行再 git_diff。不要 checkout / reset。
+${mcpPromptBlock()}
 `;
+}
+
+function mcpPromptBlock() {
+  const tools = mcpToolDefinitions()
+  if (tools.length === 0) return ''
+  const names = tools.map((t) => t.function.name).join('、')
+  const extra = mcpInstructions().slice(0, 600)
+  return `11. 已连接 MCP 工具：${names}。用户问这些工具能查的业务数据时调用它们，不要用 search_notes 代替。${extra ? `服务端说明：${extra}` : ''}`
 }
 
 /** 向 SSE 管道推事件的函数类型（由 index.ts 注入） */
@@ -320,13 +330,14 @@ async function runLive(
   const lastUser = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
   await preloadMatchedSkills(lastUser, history, send);
 
-  const maxRounds = 4;
+  const tools = getToolDefinitions()
+  const maxRounds = mcpToolDefinitions().length > 0 ? 6 : 4
   for (let round = 0; round < maxRounds; round += 1) {
     // 开启一轮流式补全，并声明可用工具
     const stream = await client.chat.completions.create({
       model,
       messages: history,
-      tools: toolDefinitions,
+      tools,
       stream: true,
     });
 

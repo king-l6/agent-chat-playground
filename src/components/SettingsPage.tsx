@@ -1,14 +1,22 @@
 /**
- * 模型配置：网页和桌面同一页。
- * Key 只写不回显；切 MOCK 即使 .env 有 Key 也不走网关。
+ * 模型配置 + MCP：网页和桌面同一页。
+ * Key / Cookie 只写不回显。
  */
 import { useEffect, useState, type FormEvent } from 'react'
-import { fetchSettings, saveSettings } from '../api/chat'
+import {
+  fetchMcp,
+  fetchSettings,
+  importClaudeMcp,
+  saveMcp,
+  saveSettings,
+  type McpPublic,
+} from '../api/chat'
 import './KnowledgePage.css'
 import './SettingsPage.css'
 
 export function SettingsPage(props: {
   onSaved?: (next: { mode: 'mock' | 'live'; model: string }) => void
+  onMcpSaved?: (next: McpPublic) => void
 }) {
   const [mode, setMode] = useState<'mock' | 'live'>('mock')
   const [apiKey, setApiKey] = useState('')
@@ -19,6 +27,12 @@ export function SettingsPage(props: {
   const [hint, setHint] = useState('')
   const [busy, setBusy] = useState(false)
 
+  const [mcpEnabled, setMcpEnabled] = useState(false)
+  const [mcpUrl, setMcpUrl] = useState('')
+  const [mcpAuth, setMcpAuth] = useState('')
+  const [mcp, setMcp] = useState<McpPublic | null>(null)
+  const [mcpBusy, setMcpBusy] = useState(false)
+
   useEffect(() => {
     fetchSettings()
       .then((data) => {
@@ -26,6 +40,13 @@ export function SettingsPage(props: {
         setBaseURL(data.baseURL)
         setModel(data.model)
         setHasKey(data.hasKey)
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+    fetchMcp()
+      .then((data) => {
+        setMcp(data)
+        setMcpEnabled(data.enabled)
+        setMcpUrl(data.url)
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
   }, [])
@@ -53,6 +74,58 @@ export function SettingsPage(props: {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function onSaveMcp(e: FormEvent) {
+    e.preventDefault()
+    setMcpBusy(true)
+    setError('')
+    setHint('')
+    try {
+      const saved = await saveMcp({
+        enabled: mcpEnabled,
+        url: mcpUrl,
+        auth: mcpAuth.trim() || undefined,
+      })
+      setMcpAuth('')
+      setMcp(saved)
+      setMcpEnabled(saved.enabled)
+      setMcpUrl(saved.url)
+      setHint(
+        saved.connected
+          ? `MCP 已连接，${saved.tools.length} 个工具。`
+          : saved.enabled
+            ? `MCP 没连上：${saved.error ?? '未知错误'}`
+            : '已关闭 MCP。',
+      )
+      props.onMcpSaved?.(saved)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setMcpBusy(false)
+    }
+  }
+
+  async function onImportClaude() {
+    setMcpBusy(true)
+    setError('')
+    setHint('')
+    try {
+      const saved = await importClaudeMcp()
+      setMcp(saved)
+      setMcpEnabled(saved.enabled)
+      setMcpUrl(saved.url)
+      setHint(
+        saved.connected
+          ? `已从 Claude 导入并连上，${saved.tools.length} 个工具。`
+          : `已导入 URL，但没连上：${saved.error ?? '未知错误'}`,
+      )
+      props.onMcpSaved?.(saved)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setMcpBusy(false)
     }
   }
 
@@ -130,6 +203,72 @@ export function SettingsPage(props: {
           <button type="submit" className="settings__save" disabled={busy}>
             {busy ? '保存中…' : '保存'}
           </button>
+        </div>
+      </form>
+
+      <form className="kb-card" onSubmit={(e) => void onSaveMcp(e)}>
+        <header className="kb-card__head">
+          <div>
+            <h2>MCP</h2>
+            <p>
+              把 Claude Code 里的 HTTP MCP 接到对话循环：tools/list 转成 function
+              calling。Cookie 只存在本机，不进仓库。交付页不会调用这些工具。
+            </p>
+          </div>
+        </header>
+        <div className="settings__body">
+          <label className={mcpEnabled ? 'settings__mode settings__mode--on' : 'settings__mode'}>
+            <input
+              type="checkbox"
+              checked={mcpEnabled}
+              onChange={(e) => setMcpEnabled(e.target.checked)}
+            />
+            <span>
+              <strong>启用</strong>
+              <em>
+                {mcp?.connected
+                  ? `已连接 ${mcp.tools.length} 个工具`
+                  : mcp?.error
+                    ? mcp.error
+                    : '未连接'}
+              </em>
+            </span>
+          </label>
+          <label className="settings__field">
+            URL
+            <input
+              type="text"
+              value={mcpUrl}
+              onChange={(e) => setMcpUrl(e.target.value)}
+              placeholder="https://ai-fe.bilibili.co/mcp"
+            />
+          </label>
+          <label className="settings__field">
+            Cookie / Authorization
+            <input
+              type="password"
+              autoComplete="off"
+              value={mcpAuth}
+              onChange={(e) => setMcpAuth(e.target.value)}
+              placeholder={mcp?.hasAuth ? '已保存，留空则保持' : '_AJSESSIONID=… 或 Bearer …'}
+            />
+          </label>
+          {mcp?.tools && mcp.tools.length > 0 ? (
+            <p className="kb__hint">工具：{mcp.tools.join('、')}</p>
+          ) : null}
+          <div className="settings__row">
+            <button type="submit" className="settings__save" disabled={mcpBusy}>
+              {mcpBusy ? '连接中…' : '保存并连接'}
+            </button>
+            <button
+              type="button"
+              className="settings__secondary"
+              disabled={mcpBusy}
+              onClick={() => void onImportClaude()}
+            >
+              从 Claude 导入
+            </button>
+          </div>
         </div>
       </form>
     </div>

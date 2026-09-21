@@ -9,6 +9,12 @@ import { retrieve } from './retrieve.js'
 import { readSkill } from './skills.js'
 import { workspaceList, workspaceRead, workspaceWrite } from './workspace.js'
 import { gitDiff, gitStatus } from './git.js'
+import { callMcpTool, isMcpTool, mcpToolDefinitions } from './mcp.js'
+
+/** 本地工具 + 已连接 MCP。对话循环用这个，不要只用下面的静态表。 */
+export function getToolDefinitions(): ChatCompletionTool[] {
+  return [...toolDefinitions, ...mcpToolDefinitions()]
+}
 
 /** 交给大模型的工具清单（function calling schema） */
 export const toolDefinitions: ChatCompletionTool[] = [
@@ -346,6 +352,9 @@ export async function executeTool(
       return JSON.stringify({ sides, count, result });
     }
     default:
+      if (isMcpTool(name)) {
+        return await callMcpTool(name, args)
+      }
       throw new Error(`未知工具: ${name}`);
   }
 }

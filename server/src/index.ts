@@ -9,6 +9,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import multer from 'multer'
 import { resolveLlmConfig, runAgentChat } from './agent.js'
+import {
+  importClaudeMcp,
+  publicMcp,
+  reconnectMcp,
+  saveMcpSettings,
+} from './mcp.js'
 import { publicLlmSettings, saveLlmSettings, type LlmMode } from './settings.js'
 import {
   applyGate,
@@ -82,6 +88,7 @@ app.get('/api/health', (_req, res) => {
     model,
     rag: getRagStatus(),
     skills: listSkills(),
+    mcp: publicMcp(),
     workspace: { root: getWorkspaceRoot() },
   })
 })
@@ -562,6 +569,39 @@ app.put('/api/settings', (req, res) => {
   }
 })
 
+app.get('/api/mcp', (_req, res) => {
+  res.json(publicMcp())
+})
+
+app.put('/api/mcp', async (req, res) => {
+  const enabled = req.body?.enabled
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({ error: 'enabled 必须是 boolean' })
+    return
+  }
+  try {
+    const saved = await saveMcpSettings({
+      enabled,
+      url: typeof req.body?.url === 'string' ? req.body.url : undefined,
+      auth: typeof req.body?.auth === 'string' ? req.body.auth : undefined,
+    })
+    res.json(saved)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: message })
+  }
+})
+
+app.post('/api/mcp/import-claude', async (_req, res) => {
+  try {
+    const saved = await importClaudeMcp()
+    res.json(saved)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: message })
+  }
+})
+
 function parseSeat(raw: unknown): Seat | null {
   return raw === 'pm' || raw === 'dev' || raw === 'qa' ? raw : null
 }
@@ -857,6 +897,14 @@ export function startServer(): Promise<void> {
       console.log(`[agent-chat] http://127.0.0.1:${PORT}  mode=${mode}  model=${model}`)
       void ensureIndex().catch((err) => {
         console.warn('[rag] 启动索引失败，先走关键词:', err)
+      })
+      void reconnectMcp().then((mcp) => {
+        if (!mcp.enabled) return
+        if (mcp.connected) {
+          console.log(`[mcp] ${mcp.tools.length} tools @ ${mcp.url}`)
+        } else {
+          console.warn('[mcp] 未连上:', mcp.error)
+        }
       })
       resolve()
     })
