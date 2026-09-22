@@ -12,6 +12,7 @@ import { resolveLlmFromSettings } from './settings.js';
 import { skillsCatalogText } from './skills.js';
 import { mcpInstructions, mcpToolDefinitions } from './mcp.js';
 import { executeTool, getToolDefinitions } from './tools.js';
+import { memoryBlockFor } from './memory/recall.js';
 import type { ChatMessageInput, SseEvent } from './types.js';
 
 /**
@@ -26,13 +27,19 @@ import type { ChatMessageInput, SseEvent } from './types.js';
  * 规则 8 是 Skill：system 里只放目录，正文靠 load_skill。
  * Prompt 是软约束（模型可能不听）；下面 runLive 的 maxRounds 是硬上限。
  */
-function buildSystemPrompt() {
+export function buildSystemPrompt(memoryBlock = '') {
+  const mcp = mcpPromptBlock()
+  // MCP 块占掉 11，记忆就顺延成 12；没有 MCP 时记忆是 11，避免出现「规则 11 不见了」
+  const memoryRule = memoryBlock
+    ? `\n${mcp ? '12' : '11'}. 关于用户的长期记忆（来自过去的会话，可能已经过时）：\n${memoryBlock}\n`
+    : ''
   return `你是「Agent Chat Playground」里的助手，面向求职演示。
 规则：
 1. 需要准确时间时调用 get_current_time。
 2. 需要计算时调用 calculator。
 3. 用户问本项目、SSE、tool calling、技术栈、怎么学、学习规划、或上传文档里的内容时，先调用 search_notes，再只根据返回的 hits 回答。search_notes 的 query 可以是用户原句或 2～6 个关键词。
 4. 使用 search_notes 后：在相关句子末尾标注引用，格式必须是方括号+数字，例如 [1] 或 [2]。数字必须来自「同一次」工具返回的 hits[].citation（本轮局部编号，1 表示本轮第一条命中）；不要用旧一次检索的编号；不要编造 hits 里没有的内容；未命中就明确说知识库没有。
+每条 hit 的 hits[].docName 是来源文档名（带期次，如「平台工作周报-2026年8月W1」）。回答要先说清内容出自哪一篇/哪一期，周报、月报、季度小结这类分期文档尤其不能只写「最近的周报」而不说期次。用户问「最近/最新」时按 hits[].docName 里的期次判断新旧，不要凭印象编；如果返回的几期都不是最新的，就照实说是哪几期，不要谎称是最新的。
 5. 用简洁中文回答；调用其它工具后也要根据工具结果给出最终结论。
 6. 用户要掷骰子、随机点数时调用 roll_dice。
 7. search_notes 对同一条用户问题最多调用 1 次。工具一旦返回了 hits（哪怕只有 1 条），必须立刻给出最终中文回答并标注 [1][2]，禁止再调用任何工具。只有 hits 为空时，才允许换一个更短的关键词再搜一次。
@@ -41,8 +48,7 @@ ${skillsCatalogText()}
 用户任务匹配某条 description 时，先 load_skill(name)，再按返回的 body 执行。同一 skill 每轮最多一次。若 history 里已经有该 skill 的 load_skill 结果，直接按 body 执行，不要再 load。问时间、算术、掷骰子不要 load_skill。
 9. 用户要读/写/列出已选工作区里的文件时，调用 workspace_read / workspace_write / workspace_list。path 只用相对路径（如 README.md）。读项目说明、SSE、简历缺口仍优先 search_notes，不要用工作区代替知识库。
 10. 用户问当前改了什么、未提交、diff 时，先 git_status，需要看具体行再 git_diff。不要 checkout / reset。
-${mcpPromptBlock()}
-`;
+${mcp}${memoryRule}`;
 }
 
 function mcpPromptBlock() {
@@ -234,7 +240,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
     const searchArgs = JSON.stringify({ query: last });
     send({ type: 'tool_start', id: searchId, name: 'search_notes', arguments: searchArgs });
     await sleep(200);
-    const result = await executeTool('search_notes', searchArgs);
+    const result = await executeTool('search_notes', searchArgs, { userQuery: last });
     send({ type: 'tool_result', id: searchId, name: 'search_notes', result });
     const parsed = JSON.parse(result) as {
       hits?: Array<{ citation?: number; title: string; snippet: string }>;
@@ -257,7 +263,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
     const args = JSON.stringify({ query: last });
     send({ type: 'tool_start', id, name: 'search_notes', arguments: args });
     await sleep(200);
-    const result = await executeTool('search_notes', args);
+    const result = await executeTool('search_notes', args, { userQuery: last });
     send({ type: 'tool_result', id, name: 'search_notes', result });
     const parsed = JSON.parse(result) as {
       hits?: Array<{ id: string; title: string; snippet: string }>;
@@ -321,13 +327,18 @@ async function runLive(
 ) {
   send({ type: 'meta', mode: 'live', model });
 
+  const lastUser = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+
+  // 长期记忆召回必须在拼 system 之前：命中几条就作为规则 12 注入。
+  // memoryBlockFor 内部 fail-open，出错返回空串，不影响这一轮聊天。
+  const memoryBlock = await memoryBlockFor(lastUser);
+
   // 对话上下文：system + 前端传来的 user/assistant
   const history: ChatCompletionMessageParam[] = [
-    { role: 'system', content: buildSystemPrompt() },
+    { role: 'system', content: buildSystemPrompt(memoryBlock) },
     ...messages.map((m) => ({ role: m.role, content: m.content }) as const),
   ];
 
-  const lastUser = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
   await preloadMatchedSkills(lastUser, history, send);
 
   const tools = getToolDefinitions()
@@ -391,7 +402,8 @@ async function runLive(
       const args = call.function.arguments;
       send({ type: 'tool_start', id: call.id, name, arguments: args });
       try {
-        const result = await executeTool(name, args);
+        // 把用户原话一起给下去：search_notes 判时间意图要用它，模型组的 query 会丢词
+        const result = await executeTool(name, args, { userQuery: lastUser });
         send({ type: 'tool_result', id: call.id, name, result });
         history.push({
           role: 'tool',

@@ -222,9 +222,14 @@ function safeCalculate(expression: string): string {
 /**
  * search_notes 工具的真正实现
  * 流程：retrieve（hybrid + rerank + 邻接扩上下文）→ JSON 给模型 / 前端卡片
+ *
+ * @param query     模型自己组的检索词，可以和用户原话不一样
+ * @param userQuery 用户原话。检索层判时间意图（「最近的周报」）要用它——
+ *                  模型转述时会丢词，实测问「平台工程周报讲了什么」组出来的 query 里
+ *                  「最近」已经没了，判 query 就等于把那一路关掉
  */
-async function searchNotes(query: string): Promise<string> {
-  const result = await retrieve(query, 3)
+async function searchNotes(query: string, userQuery?: string): Promise<string> {
+  const result = await retrieve(query, 3, userQuery)
   const { hits, mode } = result
 
   if (hits.length === 0) {
@@ -258,14 +263,19 @@ async function searchNotes(query: string): Promise<string> {
           citation: h.citation,
           id: h.id,
           docId: h.docId,
+          /** 来源文档可读名（含期次，如「平台工作周报-2026年8月W1」）；模型靠它说清「这是哪一篇」 */
+          docName: h.docName,
+          docPath: h.docPath,
           title: h.title,
+          via: h.via,
           snippet: matched.length > 200 ? `${matched.slice(0, 200)}…` : matched,
           text: forModel.length > 900 ? `${forModel.slice(0, 900)}…` : forModel,
           score: h.score,
+          rerank: h.rerank,
         }
       }),
       instruction:
-        '已有检索结果。请立即根据 hits[].text 给出最终中文回答，句末标注 [citation]，不要再次调用 search_notes。text 可能含命中块的前后邻接，引用编号仍对应该条 id。',
+        '已有检索结果。请立即根据 hits[].text 给出最终中文回答，句末标注 [citation]，不要再次调用 search_notes。text 可能含命中块的前后邻接，引用编号仍对应该条 id。回答时用 hits[].docName 说明来源文档；带期次的文档（周报/月报/季度小结）必须写清是哪一期，不要含糊成「最近的周报」。',
     },
     null,
     2,
@@ -276,11 +286,14 @@ async function searchNotes(query: string): Promise<string> {
  * 按工具名分发执行
  * @param name    工具名（来自模型 tool_calls）
  * @param rawArgs 参数 JSON 字符串
+ * @param ctx     调用方的上下文。目前只有 userQuery（用户原话），
+ *                search_notes 用它判时间意图，别的工具用不上
  * @returns       给模型 / 前端看的结果字符串（一般是 JSON）
  */
 export async function executeTool(
   name: string,
   rawArgs: string,
+  ctx?: { userQuery?: string },
 ): Promise<string> {
   let args: Record<string, unknown> = {};
   try {
@@ -303,7 +316,7 @@ export async function executeTool(
     case 'search_notes': {
       const query = String(args.query ?? '');
       if (!query) throw new Error('缺少 query');
-      return await searchNotes(query);
+      return await searchNotes(query, ctx?.userQuery);
     }
 
     case 'load_skill': {

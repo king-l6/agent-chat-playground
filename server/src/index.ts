@@ -33,18 +33,40 @@ import {
   decodeMulterName,
   ensureDataDirs,
   listDocuments,
+  listNamespaceChildren,
   tempUploadFilename,
 } from './knowledge.js'
 import {
   deleteUploadedFile,
   ensureIndex,
   getRagStatus,
+  getWikiIngestStatus,
   ingestUploadedDoc,
-  listIndexRows,
+  ingestWikiPath,
+  listDocVersionRows,
+  listIndexRowsPage,
+  resyncIndex,
+  startWikiIngest,
 } from './retrieve.js'
 import type { ChatMessageInput, SseEvent } from './types.js'
 import { browseDisk, getWorkspaceRoot, setWorkspaceRoot, suggestedHere } from './workspace.js'
 import { REPO_ROOT } from './paths.js'
+import { getWikiRoot, listWikiTree, readWikiDoc } from './wiki.js'
+import {
+  MEMORY_TYPES,
+  deleteMemory,
+  getMemory,
+  listMemories,
+  logMemoryAction,
+  memoryStats,
+  readMemoryLog,
+  saveMemory,
+  setMemoryStatus,
+  sweepMemories,
+  type MemoryStatus,
+  type MemoryType,
+} from './memory/store.js'
+import { MEMORY_TOP_K, MIN_MEMORY_COSINE, rankMemories } from './memory/recall.js'
 
 dotenv.config({ path: path.join(REPO_ROOT, '.env'), override: true })
 if (process.env.PLAYGROUND_DATA) {
@@ -740,17 +762,147 @@ app.post('/api/workspace', (req, res) => {
   }
 })
 
-app.get('/api/knowledge', (_req, res) => {
+app.get('/api/wiki/tree', (_req, res) => {
+  res.json(listWikiTree())
+})
+
+app.get('/api/wiki/doc', (req, res) => {
+  const rel = String(req.query.path ?? '').trim()
+  if (!rel) {
+    res.status(400).json({ error: '缺少 path' })
+    return
+  }
+  try {
+    res.json(readWikiDoc(rel))
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(404).json({ error: message })
+  }
+})
+
+/**
+ * POST /api/wiki/ingest
+ * body: { path } 入库一篇；或 { all: true, prefix?, limit? } 批量（后台跑）
+ */
+app.post('/api/wiki/ingest', async (req, res) => {
+  const pathRel = String(req.body?.path ?? '').trim()
+  const all = Boolean(req.body?.all)
+  const prefix = String(req.body?.prefix ?? '').trim()
+  const limit = Number(req.body?.limit ?? 0)
+  try {
+    if (pathRel) {
+      const result = await ingestWikiPath(pathRel)
+      res.json({ ok: true, mode: 'one', ...result, rag: getRagStatus() })
+      return
+    }
+    if (all) {
+      const status = startWikiIngest({
+        prefix: prefix || undefined,
+        limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+      })
+      res.json({ ok: true, mode: 'batch', status })
+      return
+    }
+    res.status(400).json({ error: '传 path 入库一篇，或 all:true 批量' })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: message })
+  }
+})
+
+app.get('/api/wiki/ingest/status', (_req, res) => {
+  res.json(getWikiIngestStatus())
+})
+
+app.get('/api/knowledge', (req, res) => {
   const rag = getRagStatus()
+  const lite = String(req.query.lite ?? '') === '1'
   res.json({
     rag,
-    documents: listDocuments(),
+    documents: lite ? [] : listDocuments(),
     index: {
       model: rag.embedding,
       dim: rag.dim,
-      chunks: listIndexRows(),
+      // 全量 chunks 太大，列表走 /api/knowledge/chunks 分页
+      chunks: [],
     },
   })
+})
+
+/** GET /api/knowledge/chunks?doc=&q=&offset=&limit= */
+app.get('/api/knowledge/chunks', (req, res) => {
+  const doc = String(req.query.doc ?? '').trim() || null
+  const q = String(req.query.q ?? '').trim()
+  const offset = Number(req.query.offset ?? 0)
+  const limit = Number(req.query.limit ?? 50)
+  const page = listIndexRowsPage({
+    docId: doc,
+    q,
+    offset: Number.isFinite(offset) ? offset : 0,
+    limit: Number.isFinite(limit) ? limit : 50,
+  })
+  res.json(page)
+})
+
+/**
+ * GET /api/knowledge/doc-versions
+ * 每篇文档的版本指纹对照。stale=true 就是「磁盘改了但向量还没更新」。
+ */
+app.get('/api/knowledge/doc-versions', (_req, res) => {
+  const rows = listDocVersionRows()
+  res.json({
+    docs: rows.length,
+    stale: rows.filter((r) => r.stale).length,
+    items: rows.sort((a, b) => Number(b.stale) - Number(a.stale) || b.chunks - a.chunks),
+  })
+})
+
+/**
+ * POST /api/knowledge/resync
+ * 重新扫描：只重算内容变了的文档。没变的一篇都不碰，重复调用没副作用。
+ */
+let resyncing = false
+app.post('/api/knowledge/resync', async (_req, res) => {
+  if (resyncing) {
+    res.status(409).json({ ok: false, error: '已有重新扫描在跑' })
+    return
+  }
+  resyncing = true
+  try {
+    const stats = await resyncIndex()
+    res.json({ ok: true, ...stats, rag: getRagStatus() })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) })
+  } finally {
+    resyncing = false
+  }
+})
+
+/** GET /api/knowledge/namespaces?path=  — 侧栏懒展开，只返回一层 */
+app.get('/api/knowledge/namespaces', (req, res) => {
+  const prefix = String(req.query.path ?? '').trim()
+  const doc = String(req.query.doc ?? '').trim()
+  if (doc) {
+    const docs = listDocuments()
+    const hit = docs.find((d) => d.docId === doc)
+    if (!hit) {
+      res.json({ path: '', children: [], resolve: null })
+      return
+    }
+    const label = hit.filename || hit.title || hit.docId
+    const parts =
+      hit.source === 'builtin'
+        ? ['内置', label.replace(/\.(md|markdown|txt)$/i, '')]
+        : label
+            .split(/[/\\]/)
+            .filter(Boolean)
+            .map((p, i, arr) =>
+              i === arr.length - 1 ? p.replace(/\.(md|markdown|txt)$/i, '') : p,
+            )
+    res.json({ path: parts.join('/'), children: [], resolve: parts })
+    return
+  }
+  res.json({ path: prefix, children: listNamespaceChildren(prefix) })
 })
 
 /**
@@ -889,15 +1041,225 @@ app.post('/api/chat', async (req, res) => {
   }
 })
 
+/* ===================== 长期记忆 ===================== */
+
+/** 前端可能传 ISO 串、毫秒数或空串（清空）；解析不了就当没传 */
+function parseExpires(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null || value === '') return null
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  const ms = Date.parse(String(value))
+  return Number.isNaN(ms) ? undefined : ms
+}
+
+function memoryTypeOf(value: unknown, fallback?: string) {
+  const raw = String(value ?? fallback ?? '').trim() as MemoryType
+  return MEMORY_TYPES.includes(raw) ? raw : null
+}
+
+/** GET /api/memory/stats：页面头部统计（总数/按类型/归档/召回榜） */
+app.get('/api/memory/stats', (_req, res) => {
+  res.json(memoryStats())
+})
+
+/**
+ * GET /api/memory/long?q=&type=&status=&offset=&limit=
+ * 长期记忆列表。status 默认 all —— 归档的也要能看见（归档只是不参与召回）
+ */
+app.get('/api/memory/long', (req, res) => {
+  const offset = Number(req.query.offset ?? 0)
+  const limit = Number(req.query.limit ?? 50)
+  const type = String(req.query.type ?? 'all')
+  const status = String(req.query.status ?? 'all')
+  res.json(
+    listMemories({
+      q: String(req.query.q ?? ''),
+      type: (MEMORY_TYPES as string[]).includes(type) ? (type as MemoryType) : 'all',
+      status: (['active', 'archived', 'superseded'] as string[]).includes(status)
+        ? (status as MemoryStatus)
+        : 'all',
+      offset: Number.isFinite(offset) ? offset : 0,
+      limit: Number.isFinite(limit) ? limit : 50,
+    }),
+  )
+})
+
+/**
+ * GET /api/memory/recall?q=
+ * 召回预览：这条问题会命中哪几条记忆、cos 多少、走的是向量还是关键词。
+ * 页面和断言脚本都靠它回答「为什么这条进了 system prompt」。
+ */
+app.get('/api/memory/recall', async (req, res) => {
+  const q = String(req.query.q ?? '').trim()
+  if (!q) {
+    res.status(400).json({ error: 'q 不能为空' })
+    return
+  }
+  try {
+    // 用 rankMemories 而不是 recallMemories：要连没过线的条目一起返回，
+    // 页面才能回答「为什么这条没进 system」。顺便不写 access_count。
+    const ranked = await rankMemories(q)
+    const baseline = ranked.length
+      ? Number((ranked.reduce((s, h) => s + h.cos, 0) / ranked.length).toFixed(4))
+      : 0
+    res.json({
+      query: q,
+      minCosine: MIN_MEMORY_COSINE,
+      topK: MEMORY_TOP_K,
+      /** 这条 query 对所有记忆的 cos 均值。区分度主要在 query 一侧，这个数就是「基线」 */
+      baseline,
+      blocked: ranked.filter((h) => h.cos < MIN_MEMORY_COSINE).length,
+      hits: ranked.slice(0, Math.max(1, Number(req.query.topK ?? MEMORY_TOP_K) || MEMORY_TOP_K)).map((h) => ({
+        id: h.entry.id,
+        description: h.entry.description,
+        type: h.entry.type,
+        status: h.entry.status,
+        cos: Number(h.cos.toFixed(4)),
+        score: Number(h.score.toFixed(4)),
+        /** 和基线比高多少：过召回时靠这个数判断是不是只是 query 基线高 */
+        gap: Number((h.cos - baseline).toFixed(4)),
+        pass: h.cos >= MIN_MEMORY_COSINE,
+        via: h.via,
+      })),
+    })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+/** POST /api/memory/long：手动新增一条（页面上「手动记录」走这里） */
+app.post('/api/memory/long', async (req, res) => {
+  const description = String(req.body?.description ?? '').trim()
+  const text = String(req.body?.text ?? '').trim()
+  if (!description) {
+    res.status(400).json({ error: 'description 不能为空' })
+    return
+  }
+  const type = memoryTypeOf(req.body?.type)
+  if (!type) {
+    res.status(400).json({ error: `type 必须是 ${MEMORY_TYPES.join(' / ')}` })
+    return
+  }
+  try {
+    const item = await saveMemory({
+      description,
+      text: text || description,
+      type,
+      salience: Number(req.body?.salience ?? 0.7),
+      sourceSession: req.body?.sourceSession ?? null,
+      sourceQuote: req.body?.sourceQuote ?? null,
+      expires: parseExpires(req.body?.expires) ?? null,
+    })
+    logMemoryAction({
+      action: 'MANUAL',
+      id: item.id,
+      reason: '页面手动新增',
+      session: item.sourceSession,
+    })
+    res.json({ ok: true, item })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+/** PUT /api/memory/long/:id：编辑（内容变了会自动重算向量） */
+app.put('/api/memory/long/:id', async (req, res) => {
+  const prev = getMemory(req.params.id)
+  if (!prev) {
+    res.status(404).json({ ok: false, error: `记忆不存在：${req.params.id}` })
+    return
+  }
+  const description = String(req.body?.description ?? prev.description).trim()
+  if (!description) {
+    res.status(400).json({ error: 'description 不能为空' })
+    return
+  }
+  try {
+    const item = await saveMemory({
+      id: prev.id,
+      description,
+      text: String(req.body?.text ?? prev.text).trim(),
+      type: memoryTypeOf(req.body?.type, prev.type) ?? prev.type,
+      salience: Number(req.body?.salience ?? prev.salience),
+      sourceSession: prev.sourceSession,
+      sourceQuote: req.body?.sourceQuote ?? prev.sourceQuote,
+      expires: parseExpires(req.body?.expires) ?? prev.expires,
+    })
+    logMemoryAction({ action: 'MANUAL', id: item.id, reason: '页面编辑', session: item.sourceSession })
+    res.json({ ok: true, item })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+/** DELETE /api/memory/long/:id：真删（连同向量）。想留痕用归档 */
+app.delete('/api/memory/long/:id', (req, res) => {
+  if (!deleteMemory(req.params.id)) {
+    res.status(404).json({ ok: false, error: `记忆不存在：${req.params.id}` })
+    return
+  }
+  logMemoryAction({ action: 'DELETE', id: req.params.id, reason: '页面删除' })
+  res.json({ ok: true })
+})
+
+/** POST /api/memory/long/:id/archive|restore：归档只是不参与召回，不删 */
+for (const [path, status, action, reason] of [
+  ['archive', 'archived', 'ARCHIVE', '页面归档'],
+  ['restore', 'active', 'RESTORE', '页面恢复'],
+] as const) {
+  app.post(`/api/memory/long/:id/${path}`, (req, res) => {
+    const item = setMemoryStatus(req.params.id, status)
+    if (!item) {
+      res.status(404).json({ ok: false, error: `记忆不存在：${req.params.id}` })
+      return
+    }
+    logMemoryAction({ action, id: item.id, reason })
+    res.json({ ok: true, item })
+  })
+}
+
+/**
+ * POST /api/memory/sweep：手动扫一遍衰减归档（过期 / 从没被召回且 60 天没动）。
+ * 项目里没有定时器，所以启动时跑一次 + 页面给个按钮。
+ */
+app.post('/api/memory/sweep', (_req, res) => {
+  const result = sweepMemories()
+  for (const id of [...result.expired, ...result.stale]) {
+    logMemoryAction({
+      action: 'ARCHIVE',
+      id,
+      reason: result.expired.includes(id) ? '过了 expires' : `60 天没被召回`,
+    })
+  }
+  res.json({ ok: true, ...result, stats: memoryStats() })
+})
+
+/** GET /api/memory/log：写入决策时间线（ADD/UPDATE/DELETE/NOOP…） */
+app.get('/api/memory/log', (req, res) => {
+  const limit = Number(req.query.limit ?? 100)
+  res.json({ items: readMemoryLog(Number.isFinite(limit) ? limit : 100) })
+})
+
 export function startServer(): Promise<void> {
   return new Promise((resolve, reject) => {
     const server = app.listen(PORT, '127.0.0.1', () => {
       const { apiKey, model } = resolveLlmConfig()
       const mode = apiKey ? 'live' : 'mock'
+      const wiki = listWikiTree()
       console.log(`[agent-chat] http://127.0.0.1:${PORT}  mode=${mode}  model=${model}`)
+      console.log(`[wiki] ${wiki.exists ? `${wiki.count} 篇 @ ${getWikiRoot()}` : `目录不存在 ${getWikiRoot()}`}`)
       void ensureIndex().catch((err) => {
         console.warn('[rag] 启动索引失败，先走关键词:', err)
       })
+      // 遗忘：每次启动扫一遍衰减归档（没有定时器，启动时跑最省事）
+      try {
+        const swept = sweepMemories()
+        if (swept.expired.length + swept.stale.length > 0) {
+          console.log(`[memory] 归档 ${swept.expired.length} 条过期 / ${swept.stale.length} 条久未召回`)
+        }
+      } catch (err) {
+        console.warn('[memory] 启动归档扫描失败:', err instanceof Error ? err.message : err)
+      }
       void reconnectMcp().then((mcp) => {
         if (!mcp.enabled) return
         if (mcp.connected) {

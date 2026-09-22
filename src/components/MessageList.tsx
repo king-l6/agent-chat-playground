@@ -2,6 +2,7 @@
  * 消息列表：渲染用户/助手气泡，以及中间的工具卡片
  */
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type { ToolCallView, UiMessage } from '../types'
 import { CitationMarkdown } from './CitationMarkdown'
 import { ToolCard } from './ToolCard'
@@ -59,7 +60,7 @@ export function MessageList({ messages }: { messages: UiMessage[] }) {
                 /* 助手：解析 [1][2] 角标，数据来自同条消息里的 search_notes */
                 <CitationMarkdown content={m.content} tools={m.tools} />
               ) : (
-                <ReactMarkdown>{m.content}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
               )}
               {m.status === 'streaming' && <span className="caret" />}
             </div>

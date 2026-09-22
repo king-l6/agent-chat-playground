@@ -22,3 +22,21 @@ export const SKILLS_DIR = process.env.PLAYGROUND_SKILLS
 export const HANDBOOK_PATH = process.env.PLAYGROUND_HANDBOOK
   ? path.resolve(process.env.PLAYGROUND_HANDBOOK)
   : path.join(REPO_ROOT, '求职补充手册.md')
+
+/** 文档页浏览的 wiki 导出；不填则读 server/data/wiki */
+export const WIKI_DIR = process.env.PLAYGROUND_WIKI
+  ? path.resolve(process.env.PLAYGROUND_WIKI)
+  : path.join(DATA_DIR, 'wiki')
+
+/**
+ * 长期记忆：一条记忆一个 markdown 文件，人可读可编辑。
+ * 向量另存 memory-index.json，和正文分开——正文是给人看的，向量是给检索用的。
+ */
+export const MEMORY_DIR = process.env.PLAYGROUND_MEMORY
+  ? path.resolve(process.env.PLAYGROUND_MEMORY)
+  : path.join(DATA_DIR, 'memory')
+
+export const MEMORY_INDEX_PATH = path.join(DATA_DIR, 'memory-index.json')
+
+/** 写入决策日志（ADD/UPDATE/DELETE/NOOP），追加写的 jsonl，用于页面审计 */
+export const MEMORY_LOG_PATH = path.join(DATA_DIR, 'memory-log.jsonl')

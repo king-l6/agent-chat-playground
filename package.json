@@ -18,6 +18,8 @@
     "pack:app": "npm run electron:compile && tsc -p tsconfig.server.json && ELECTRON_BUILD=1 VITE_API_BASE=http://127.0.0.1:8790 vite build",
     "dist": "npm run pack:app && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --publish never",
     "eval:rag": "tsx server/src/eval.ts",
+    "index:sync": "tsx server/scripts/resync-index.ts",
+    "wiki:ingest": "tsx server/scripts/wiki-ingest.ts",
     "crawl:wework": "tsx server/scripts/wework-crawler.ts",
     "lint": "oxlint"
   },
@@ -34,6 +36,7 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

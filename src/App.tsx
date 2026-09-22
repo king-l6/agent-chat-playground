@@ -1,28 +1,34 @@
 /**
- * 根组件：聊天页状态机
- * - 维护 messages / 输入框 / busy
- * - 调 streamChat，把 SSE 事件落到某一条助手消息上
+ * 根组件：左侧 AgentOS 导航 + 各页内容
+ * 聊天页按会话存 messages，SSE 写回对应会话，互不覆盖
  */
 import { useEffect, useRef, useState } from 'react';
 import { streamChat, toApiMessages, fetchHealth, type RagStatus, type SkillMeta, type McpPublic } from './api/chat';
 import type { SseEvent, UiMessage } from './types';
 import { MessageList } from './components/MessageList';
 import { DocumentsPage } from './components/DocumentsPage';
+import { MemoryPage } from './components/MemoryPage';
 import { VectorsPage } from './components/VectorsPage';
 import { CanvasPage } from './components/CanvasPage';
 import { WorkspaceBar } from './components/WorkspaceBar';
 import { SettingsPage } from './components/SettingsPage';
 import { DeliveryPage } from './components/DeliveryPage';
+import { AppSidebar } from './components/AppSidebar';
+import { SessionList } from './components/SessionList';
+import {
+  blankSession,
+  loadSessions,
+  saveSessions,
+  sessionTitle,
+  uid,
+  type ChatSession,
+} from './sessionStore';
 import './components/AppShell.css';
 
-/** 生成前端本地唯一 id（消息 id、助手气泡 id） */
-function uid() {
-  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function pageFromHash(): 'chat' | 'documents' | 'vectors' | 'canvas' | 'settings' | 'delivery' {
+function pageFromHash(): 'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery' {
   const path = location.hash.replace(/^#\/?/, '').split('?')[0]
   if (path.startsWith('canvas') || path.startsWith('workflow')) return 'canvas'
+  if (path.startsWith('memory')) return 'memory'
   if (path.startsWith('vectors')) return 'vectors'
   if (path.startsWith('documents') || path.startsWith('knowledge')) return 'documents'
   if (path.startsWith('settings') || path.startsWith('config')) return 'settings'
@@ -31,12 +37,13 @@ function pageFromHash(): 'chat' | 'documents' | 'vectors' | 'canvas' | 'settings
 }
 
 export default function App() {
-  /** 聊天记录 */
-  const [messages, setMessages] = useState<UiMessage[]>([]);
-  /** 输入框文案 */
-  const [input, setInput] = useState('');
-  /** 是否正在生成（禁用发送、显示停止） */
-  const [busy, setBusy] = useState(false);
+  const [boot] = useState(loadSessions);
+  const [sessions, setSessions] = useState<ChatSession[]>(() => boot.sessions);
+  const [activeId, setActiveId] = useState(() => boot.activeId);
+  /** 各会话自己的草稿，切换时不丢 */
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  /** 正在生成的会话 id；别的会话仍可发送 */
+  const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
   /** 右上角徽章：live / mock / 未连接 */
   const [mode, setMode] = useState<'live' | 'mock' | 'unknown'>('unknown');
   const [model, setModel] = useState<string>('');
@@ -44,20 +51,54 @@ export default function App() {
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [mcp, setMcp] = useState<McpPublic | null>(null);
   const [page, setPage] = useState<
-    'chat' | 'documents' | 'vectors' | 'canvas' | 'settings' | 'delivery'
+    'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery'
   >(pageFromHash);
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem('agentos.rail') === '1');
   /** 顶部/底部错误条 */
   const [error, setError] = useState<string>('');
-  /** 当前请求的 AbortController，点停止时 abort */
-  const abortRef = useRef<AbortController | null>(null);
-  /** 锚点：消息变了滚到底部 */
+  /** 每个会话一份 AbortController，停止只打断当前这条 */
+  const abortMap = useRef(new Map<string, AbortController>());
+  /** 锚点：当前会话有新消息就滚到底部 */
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const active = sessions.find((s) => s.id === activeId) ?? sessions[0];
+  const messages = active?.messages ?? [];
+  const input = active ? (drafts[active.id] ?? '') : '';
+  const activeBusy = active ? busyIds.has(active.id) : false;
 
   useEffect(() => {
     const onHash = () => setPage(pageFromHash());
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem('agentos.rail', collapsed ? '1' : '0')
+  }, [collapsed])
+
+  useEffect(() => {
+    if (!sessions.some((s) => s.id === activeId) && sessions[0]) {
+      setActiveId(sessions[0].id)
+    }
+  }, [sessions, activeId])
+
+  const snap = useRef({ activeId, sessions })
+  snap.current = { activeId, sessions }
+
+  useEffect(() => {
+    const flush = () => saveSessions(snap.current.activeId, snap.current.sessions)
+    window.addEventListener('pagehide', flush)
+    return () => {
+      window.removeEventListener('pagehide', flush)
+      flush()
+    }
+  }, [])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      saveSessions(snap.current.activeId, snap.current.sessions)
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [activeId, sessions])
 
   // 进页先 ping 一下健康检查
   useEffect(() => {
@@ -81,17 +122,32 @@ export default function App() {
    * 只更新指定 id 的那条助手消息（不可变更新）
    * updater 收到旧消息，返回新消息对象
    */
+  function setInput(value: string) {
+    if (!active) return
+    const id = active.id
+    setDrafts((prev) => ({ ...prev, [id]: value }))
+  }
+
   function patchAssistant(
+    sessionId: string,
     assistantId: string,
     updater: (msg: UiMessage) => UiMessage,
   ) {
-    setMessages((prev) =>
-      prev.map((m) => (m.id === assistantId ? updater(m) : m)),
-    );
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === sessionId
+          ? {
+              ...s,
+              updatedAt: Date.now(),
+              messages: s.messages.map((m) => (m.id === assistantId ? updater(m) : m)),
+            }
+          : s,
+      ),
+    )
   }
 
-  /** 把单个 SSE 事件反映到 UI（核心状态机） */
-  function handleEvent(assistantId: string, event: SseEvent) {
+  /** 把单个 SSE 事件写回发起它的那条会话 */
+  function handleEvent(sessionId: string, assistantId: string, event: SseEvent) {
     if (event.type === 'meta') {
       setMode(event.mode);
       if (event.model) setModel(event.model);
@@ -99,7 +155,7 @@ export default function App() {
     }
     if (event.type === 'text_delta') {
       // 追加一段文字，并标成 streaming
-      patchAssistant(assistantId, (m) => ({
+      patchAssistant(sessionId, assistantId, (m) => ({
         ...m,
         content: m.content + event.delta,
         status: 'streaming',
@@ -108,7 +164,7 @@ export default function App() {
     }
     if (event.type === 'tool_start') {
       // 插入/替换一张 running 卡片（同 id 先滤掉再加，避免重复）
-      patchAssistant(assistantId, (m) => {
+      patchAssistant(sessionId, assistantId, (m) => {
         return {
           ...m,
           tools: [
@@ -126,7 +182,7 @@ export default function App() {
     }
     if (event.type === 'tool_result') {
       // 对应卡片改为完成，写入 result
-      patchAssistant(assistantId, (m) => {
+      patchAssistant(sessionId, assistantId, (m) => {
         return {
           ...m,
           tools: m.tools.map((t) =>
@@ -139,7 +195,7 @@ export default function App() {
       return;
     }
     if (event.type === 'tool_error') {
-      patchAssistant(assistantId, (m) => {
+      patchAssistant(sessionId, assistantId, (m) => {
         return {
           ...m,
           tools: m.tools.map((t) =>
@@ -153,11 +209,11 @@ export default function App() {
     }
     if (event.type === 'error') {
       setError(event.message);
-      patchAssistant(assistantId, (m) => ({ ...m, status: 'error' }));
+      patchAssistant(sessionId, assistantId, (m) => ({ ...m, status: 'error' }));
       return;
     }
     if (event.type === 'done') {
-      patchAssistant(assistantId, (m) => ({ ...m, status: 'done' }));
+      patchAssistant(sessionId, assistantId, (m) => ({ ...m, status: 'done' }));
     }
   }
 
@@ -165,14 +221,53 @@ export default function App() {
    * 发送一轮对话
    * @param text 可选：快捷提示按钮传入；不传则用输入框
    */
+  function markBusy(sessionId: string, on: boolean) {
+    setBusyIds((prev) => {
+      const next = new Set(prev)
+      if (on) next.add(sessionId)
+      else next.delete(sessionId)
+      return next
+    })
+  }
+
+  function openSession() {
+    const empty = sessions.find((s) => s.messages.length === 0 && !busyIds.has(s.id))
+    if (empty) {
+      setActiveId(empty.id)
+      saveSessions(empty.id, sessions)
+      setError('')
+      return
+    }
+    const created = blankSession()
+    const next = [created, ...sessions]
+    setSessions(next)
+    setActiveId(created.id)
+    saveSessions(created.id, next)
+    setError('')
+  }
+
+  function removeSession(id: string) {
+    abortMap.current.get(id)?.abort()
+    abortMap.current.delete(id)
+    markBusy(id, false)
+    const rest = sessions.filter((s) => s.id !== id)
+    const next = rest.length > 0 ? rest : [blankSession()]
+    const nextActive = activeId === id ? next[0].id : activeId
+    setSessions(next)
+    setActiveId(nextActive)
+    saveSessions(nextActive, next)
+  }
+
   async function onSend(text?: string) {
+    const sessionId = active?.id
+    if (!sessionId) return
     const content = (text ?? input).trim();
-    if (!content || busy) return;
+    if (!content || busyIds.has(sessionId)) return;
 
     setError('');
-    setInput('');
+    setDrafts((prev) => ({ ...prev, [sessionId]: '' }));
 
-    // 先落盘用户消息 + 空的助手气泡（后面靠 SSE 往里填）
+    const prior = messages
     const userMsg: UiMessage = {
       id: uid(),
       role: 'user',
@@ -189,28 +284,37 @@ export default function App() {
       status: 'streaming',
     };
 
-    const next = [...messages, userMsg, assistantMsg];
-    setMessages(next);
-    setBusy(true);
+    setSessions((prev) => {
+      const next = prev.map((s) => {
+        if (s.id !== sessionId) return s
+        const nextMessages = [...s.messages, userMsg, assistantMsg]
+        return {
+          ...s,
+          title: sessionTitle(nextMessages),
+          updatedAt: Date.now(),
+          messages: nextMessages,
+        }
+      })
+      saveSessions(sessionId, next)
+      return next
+    })
+    markBusy(sessionId, true);
 
     const controller = new AbortController();
-    abortRef.current = controller;
+    abortMap.current.set(sessionId, controller);
 
     try {
-      // 注意：发给后端的历史不含空助手气泡，只到 userMsg
       await streamChat({
-        messages: toApiMessages([...messages, userMsg]),
+        messages: toApiMessages([...prior, userMsg]),
         signal: controller.signal,
-        onEvent: (event) => handleEvent(assistantId, event),
+        onEvent: (event) => handleEvent(sessionId, assistantId, event),
       });
-      // 流正常结束但没收到 done 时，兜底标 done
-      patchAssistant(assistantId, (m) =>
+      patchAssistant(sessionId, assistantId, (m) =>
         m.status === 'streaming' ? { ...m, status: 'done' } : m,
       );
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
-        // 用户点了停止
-        patchAssistant(assistantId, (m) => ({
+        patchAssistant(sessionId, assistantId, (m) => ({
           ...m,
           status: 'done',
           content: m.content || '（已停止）',
@@ -218,21 +322,20 @@ export default function App() {
       } else {
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
-        patchAssistant(assistantId, (m) => ({
+        patchAssistant(sessionId, assistantId, (m) => ({
           ...m,
           status: 'error',
           content: m.content || `出错了：${message}`,
         }));
       }
     } finally {
-      setBusy(false);
-      abortRef.current = null;
+      markBusy(sessionId, false);
+      abortMap.current.delete(sessionId);
     }
   }
 
-  /** 中断当前 SSE 请求 */
   function onStop() {
-    abortRef.current?.abort();
+    if (active) abortMap.current.get(active.id)?.abort();
   }
 
   const talk = (
@@ -270,7 +373,7 @@ export default function App() {
                   key={q}
                   type="button"
                   className="hint"
-                  disabled={busy}
+                  disabled={activeBusy}
                   onClick={() => onSend(q)}
                 >
                   {q}
@@ -298,7 +401,7 @@ export default function App() {
               }
             }}
           />
-          {busy ? (
+          {activeBusy ? (
             <button type="button" className="btn btn--stop" onClick={onStop}>
               停止
             </button>
@@ -313,86 +416,48 @@ export default function App() {
   )
 
   return (
-    <div
-      className={
-        page === 'delivery' ? 'app app--kb app--desk' : page === 'chat' ? 'app app--dock' : 'app app--dock app--split'
-      }
-    >
-      <header className="chrome">
-      <div className='topbar'>
-        <div>
-          <div className='brand'>Agent Chat Playground</div>
-          <div className='sub'>SSE · Tool · Skill · RAG · 编排画布</div>
-        </div>
-        <div className="topbar__right">
-          <nav className="nav">
-            <a className={page === 'chat' ? 'nav__link nav__link--on' : 'nav__link'} href="#/">
-              对话
-            </a>
-            <a
-              className={page === 'documents' ? 'nav__link nav__link--on' : 'nav__link'}
-              href="#/documents"
-            >
-              文档
-            </a>
-            <a
-              className={page === 'vectors' ? 'nav__link nav__link--on' : 'nav__link'}
-              href="#/vectors"
-            >
-              向量库
-            </a>
-            <a
-              className={page === 'canvas' ? 'nav__link nav__link--on' : 'nav__link'}
-              href="#/canvas"
-            >
-              编排
-            </a>
-            <a
-              className={page === 'delivery' ? 'nav__link nav__link--on' : 'nav__link'}
-              href="#/delivery"
-            >
-              交付
-            </a>
-            <a
-              className={page === 'settings' ? 'nav__link nav__link--on' : 'nav__link'}
-              href="#/settings"
-            >
-              配置
-            </a>
-          </nav>
-          <a className={`badge badge--${mode}`} href="#/settings" title="配置 API Key">
-            {mode === 'live' && `LIVE${model ? ` · ${model}` : ''}`}
-            {mode === 'mock' && 'MOCK（未配置 API Key）'}
-            {mode === 'unknown' && '后端未连接'}
-          </a>
-        </div>
+    <div className={collapsed ? 'app app--rail' : 'app'}>
+      <AppSidebar
+        page={page}
+        collapsed={collapsed}
+        mode={mode}
+        model={model}
+        onToggle={() => setCollapsed((v) => !v)}
+      />
+      <div className="app__body">
+        <WorkspaceBar />
+        {page === 'chat' && (
+          <div className="app__chat">
+            <SessionList
+              sessions={sessions}
+              activeId={active?.id ?? ''}
+              busyIds={busyIds}
+              onNew={openSession}
+              onSelect={(id) => {
+                setActiveId(id)
+                saveSessions(id, sessions)
+                setError('')
+              }}
+              onDelete={removeSession}
+            />
+            {talk}
+          </div>
+        )}
+        {page === 'documents' && <DocumentsPage />}
+        {page === 'memory' && <MemoryPage />}
+        {page === 'vectors' && <VectorsPage />}
+        {page === 'canvas' && <CanvasPage />}
+        {page === 'delivery' && <DeliveryPage />}
+        {page === 'settings' && (
+          <SettingsPage
+            onSaved={(next) => {
+              setMode(next.mode)
+              setModel(next.model)
+            }}
+            onMcpSaved={(next) => setMcp(next)}
+          />
+        )}
       </div>
-      <WorkspaceBar />
-      </header>
-
-      {page === 'delivery' ? (
-        <DeliveryPage />
-      ) : (
-        <div className={page === 'chat' ? 'app__stage app__stage--solo' : 'app__stage'}>
-          {talk}
-          {page !== 'chat' && (
-            <div className="app__side">
-              {page === 'documents' && <DocumentsPage />}
-              {page === 'vectors' && <VectorsPage />}
-              {page === 'canvas' && <CanvasPage />}
-              {page === 'settings' && (
-                <SettingsPage
-                  onSaved={(next) => {
-                    setMode(next.mode)
-                    setModel(next.model)
-                  }}
-                  onMcpSaved={(next) => setMcp(next)}
-                />
-              )}
-            </div>
-          )}
-        </div>
-      )}
     </div>
   )
 }

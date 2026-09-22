@@ -60,6 +60,18 @@
   font-size: 0.88rem;
 }
 
+/* 来源文档名：比块标题更上一层的定位（哪一篇、哪一期） */
+.cite-popover__doc {
+  display: block;
+  margin-bottom: 0.3rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px dashed #e2e8f0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #1d4ed8;
+  word-break: break-all;
+}
+
 .cite-popover__meta {
   display: block;
   margin-bottom: 0.35rem;

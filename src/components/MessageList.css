@@ -72,6 +72,39 @@
   padding-left: 1.2rem;
 }
 
+/*
+ * GFM 表格（remark-gfm）：模型汇总数据时爱用表格，列多到 6~8 列很常见，
+ * 而聊天栏最宽只有 860px。所以表格自己当滚动容器（display:block + overflow-x），
+ * 而不是把整个气泡撑宽。同款写法见 DocumentsPage.css 的 .wiki__md table。
+ */
+.msg__content table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  width: max-content;
+  max-width: 100%;
+  margin: 0.6rem 0;
+  font-size: 0.88rem;
+}
+
+.msg__content th,
+.msg__content td {
+  border: 1px solid #e2e8f0;
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.msg__content th {
+  background: #f1f5f9;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.msg__content tbody tr:nth-child(even) td {
+  background: #f8fafc;
+}
+
 .muted {
   color: #94a3b8;
 }
