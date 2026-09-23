@@ -34,9 +34,11 @@ import {
   type SearchHit,
 } from './knowledge.js'
 import { annotateImageText } from './imageText.js'
+import { imageCacheId, imageFileById, imageServePath } from './imageCache.js'
 import {
   getImageIndexStatus,
   indexDocImages,
+  listDocImages,
   removeDocImages,
   searchImages,
 } from './imageIndex.js'
@@ -974,6 +976,130 @@ const TIME_KEEP_ISSUES = 2
 const WEAK_KEEP_ISSUES = 1
 
 /**
+ * 「要图」的门：只认用户原话里的显式说法，和 recencyIntent 一个口径。
+ * 不认光秃秃一个「图」——「架构图」「流程图」大多是要文字说明，「视图」「意图」更是误伤。
+ *
+ * 后半截是「图 + 索要动作」的搭配，别写成「给我图」这种固定顺序：
+ * 实测用户说的是「…里面的图给我」，顺序一反，只列固定词组的写法就不命中了。
+ * 同理不能只匹配「图发」两个字——「视图发布流程」里就藏着它们。
+ */
+const IMAGE_INTENT_RE =
+  /原图|截图|图片|配图|长图|动图|贴图|相册|有图|发图|看图|张图|把图|拿图|要图|图(?:给我|发我|发来|发过来|贴出来|贴一下|拿来|来一张|呢)/
+
+export function wantsImage(query: string, userQuery?: string): boolean {
+  const own = userQuery?.trim() || query
+  return IMAGE_INTENT_RE.test(own)
+}
+
+/** 一次最多挂几张：和 tools.ts 给模型的「一次最多贴 2 张」对齐 */
+const MAX_DOC_IMAGES = 2
+
+/** 正文里的图片链接：`![alt](url)`。alt 在企微 md 里基本都是空的，标题另取 */
+const MD_IMAGE_RE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g
+
+/**
+ * 命中正文自己引用的图 → 本地缓存的那张图。
+ *
+ * 触发不靠用户说什么，靠**内容**：这条命中的结论本来就是从那张图来的
+ * （带图块的正文里就带着 `![...](url)` 和「图中文字」），图不跟着回去，答案就是残的。
+ * 所以它不管用户有没有提「图」——这是「返回的东西依赖图就自动带回」。
+ *
+ * 只挂本地真有字节的：URL 能算出 id（sha256 前 16 位，和 imageCache 同一套），
+ * 但盘上没有文件就跳过——远程链接可能已失效，贴出去是裂图。
+ *
+ * 扫 `context ?? text`，不是只扫 text：实测问「8月W1 平台渗透率的数据是多少」，
+ * 6 条命中的 text 里一个图片链接都没有，图全在**邻接扩出来的 context** 里
+ * （带图块 `-c2` 没被命中，但它作为 `-c1` 的邻居进了上下文）。
+ * 而模型看到的正是 context（tools.ts 里 `forModel = h.context ?? h.text`）——
+ * 扫 text 会一条都挂不上，扫 context 才是「模型看到的正文里带图就带回」。
+ */
+export function attachReferencedImages(hits: SearchHit[], cap = MAX_DOC_IMAGES): SearchHit[] {
+  const out: SearchHit[] = []
+  const seen = new Set<string>()
+  // 两遍扫，纯粹是优先级、不掺语义判断（CLIP 在这份语料上没有判别力，见下）：
+  //   ①命中块自己的正文带图 —— 强依赖，答案多半就是这张图来的；
+  //   ②邻接 context 里带的图 —— 弱依赖，可能只是同文档里凑近了的图。
+  // 不两遍的话，命中 1 的邻居图会先把 cap 占满，真图反而被挤掉。
+  const passes: Array<(h: SearchHit) => string> = [
+    (h) => h.text ?? '',
+    (h) => h.context ?? '',
+  ]
+  for (const at of passes) {
+    for (const h of hits) {
+      if (out.length >= cap) break
+      for (const m of at(h).matchAll(MD_IMAGE_RE)) {
+        if (out.length >= cap) break
+        const id = `img_${imageCacheId(m[2])}`
+        if (seen.has(id) || !imageFileById(id)) continue
+        seen.add(id)
+        // 标题优先取图片索引里的（人工可读），退到块标题去掉「· 图」后缀
+        const title =
+          listDocImages(h.docId).find((it) => it.id === id)?.title ||
+          h.title.replace(/\s*·\s*图$/, '')
+        out.push({
+          id,
+          docId: h.docId,
+          // 带上期次：几期周报的图片标题会一模一样（都叫「平台渗透率 & 质量报表」），
+          // 模型靠它才能说清「贴的是哪一期的图」，也才有依据挑对那张
+          title: `图片 · ${h.docName ? `${h.docName} · ` : ''}${title}`,
+          text: '（这条命中的正文引用了它，原图见 imageUrl）',
+          citation: 0,
+          score: 0,
+          via: 'image',
+          imageUrl: imageServePath(id),
+        })
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * 按文档挂图：文本命中了哪几篇，就把那几篇里的图一并给模型。
+ *
+ * 为什么不让 CLIP 去找图（2026-09-22 实测，见 server/scripts/debug-image-recall.ts）：
+ * 中文问句对图的余弦没有判别力。1668 张图里 542 张能过 MIN_IMAGE_COSINE=0.26，
+ * 最高分 0.313 全是无关图，而用户真正要的那张排到第 1224 名（0.209）；
+ * 随机两张无关图之间的余弦本来就有 0.56~0.72。就算侥幸进了融合，
+ * 图片命中的 RRF（权重 0.85）也低于文本命中，会被 assembleHits 的
+ * budget = topK × CHUNKS_PER_DOC 按分砍掉——实测 6 条命中里 0 张图。
+ *
+ * 所以反过来做：图不需要被「搜」出来。用户的真实意图是「某篇文档里的图」，
+ * 而哪篇文档由文本检索负责定位（文本侧本来就准），篇里的图是确定的事实。
+ * 谁进 hits 就挂谁的图，完全不参与打分和排序，因此也不受上面那套阈值影响。
+ *
+ * 只对带「原图/截图/图片…」字样的**用户原话**生效，其余查询一个字都不改。
+ */
+export function attachDocImages(hits: SearchHit[], cap = MAX_DOC_IMAGES): SearchHit[] {
+  // 语义通道已经给过图就不重复挂（现在实际不会走到，留着防以后调权重又让它漏进来）
+  if (hits.some((h) => h.imageUrl)) return hits
+
+  const out: SearchHit[] = []
+  const seenDoc = new Set<string>()
+  for (const h of hits) {
+    if (out.length >= cap) break
+    if (seenDoc.has(h.docId)) continue
+    seenDoc.add(h.docId)
+    for (const img of listDocImages(h.docId)) {
+      if (out.length >= cap) break
+      out.push({
+        id: img.id,
+        docId: img.docId,
+        title: `图片 · ${img.title}`,
+        // 远程 URL 不进 text：贴图只该用 imageUrl 那条站内直出地址（见 tools.ts 的指令）
+        text: img.ocr ? `图中文字：${img.ocr}` : '（这是来源文档里的图，没有识别出的图中文字）',
+        citation: 0,
+        // 0 分不是「不相关」，是「没走打分通道」；via 会标出来
+        score: 0,
+        via: 'image',
+        imageUrl: imageServePath(img.id),
+      })
+    }
+  }
+  return out.length ? [...hits, ...out] : hits
+}
+
+/**
  * 「最近」这一问，只能用时间约束来答，不能靠相似度。
  *
  * 实测过为什么：同一份周报的每一期共用一套模板（「平台渗透率 & 质量报表」「本周」「上周」），
@@ -1089,7 +1215,17 @@ export async function assembleHits(
 
   const budget = Math.max(topK, 1) * CHUNKS_PER_DOC
   const picked = [...fresh, ...rest].slice(0, budget)
-  return expandWithNeighbors(picked, pool).map((h, i) => ({ ...h, citation: i + 1 }))
+  // 必须先扩容再挂图：正文里的图片链接几乎都在**邻接块**里（命中块 `-c1` 自己没图，
+  // 带图的 `-c2` 是作为邻居被拼进 context 的），而 context 是 expandWithNeighbors 才建的。
+  const expanded = expandWithNeighbors(picked, pool)
+  // 图片追加在末尾，不动文本命中的名次。先看内容依赖（准），没有再按用户要图兜一层。
+  const referenced = attachReferencedImages(expanded)
+  const withImages = referenced.length
+    ? [...expanded, ...referenced]
+    : wantsImage(query, userQuery)
+      ? attachDocImages(expanded)
+      : expanded
+  return withImages.map((h, i) => ({ ...h, citation: i + 1 }))
 }
 
 /**
@@ -1142,6 +1278,12 @@ export async function retrieve(
       text: h.text,
       citation: h.citation,
       score: h.score,
+      /**
+       * 本地直出地址。h.text 里那个远程 URL 又长（~110 字）又跨站，
+       * 贴出来前端还得去拉企微 CDN（实测同一 URL 两次取回的字节都不一样），
+       * 这里给一条 35 字的本站相对地址，字节就在 server/data/images 里。
+       */
+      imageUrl: imageServePath(h.id),
     }))
     const fused =
       imageHits.length > 0 ? fuseRrf([textRanked, imageHits], pool, [1, 0.85]) : textRanked

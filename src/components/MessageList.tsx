@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { ToolCallView, UiMessage } from '../types'
 import { CitationMarkdown } from './CitationMarkdown'
+import { ChatImage } from './ChatImage'
 import { ToolCard } from './ToolCard'
 import './MessageList.css'
 
@@ -60,7 +61,10 @@ export function MessageList({ messages }: { messages: UiMessage[] }) {
                 /* 助手：解析 [1][2] 角标，数据来自同条消息里的 search_notes */
                 <CitationMarkdown content={m.content} tools={m.tools} />
               ) : (
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                /* 用户消息现在也能贴图（比如把一条图片地址丢进来） */
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ img: ChatImage }}>
+                  {m.content}
+                </ReactMarkdown>
               )}
               {m.status === 'streaming' && <span className="caret" />}
             </div>

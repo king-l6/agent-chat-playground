@@ -16,6 +16,7 @@ import {
   saveMcpSettings,
 } from './mcp.js'
 import { publicLlmSettings, saveLlmSettings, type LlmMode } from './settings.js'
+import { IMAGE_ROUTE, imageFileById, isImageId, mimeOf } from './imageCache.js'
 import {
   applyGate,
   changeSeat,
@@ -559,6 +560,36 @@ app.get('/api/image/render/:id', (req, res) => {
   res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8')
   res.setHeader('Cache-Control', 'public, max-age=3600')
   res.send(buildBeautySvg(record))
+})
+
+/**
+ * GET /api/image/cache/:id —— 把入库时缓存的企微原图直接发给前端。
+ *
+ * 纯读本地字节：不联网、不查 image-index、不碰 CLIP，所以可以被回答里的
+ * markdown 图片反复请求。检索侧拼给模型的地址见 imageCache.imageServePath()。
+ */
+app.get(`${IMAGE_ROUTE}/:id`, (req, res) => {
+  const id = String(req.params.id ?? '')
+  if (!isImageId(id)) {
+    // 形状不对的 id 不可能对应缓存文件（也挡住了 ..%2f 这类越界尝试）
+    res.status(400).json({ error: '图片 id 非法', code: 'IMAGE_ID_INVALID' })
+    return
+  }
+  const file = imageFileById(id)
+  if (!file) {
+    res.status(404).json({ error: '图片未缓存', code: 'IMAGE_NOT_FOUND' })
+    return
+  }
+  try {
+    res.setHeader('Content-Type', mimeOf(file))
+    // 文件名是源 URL 的 sha256，而 findCachedImage 命中即复用、从不覆写，
+    // 所以同一个 id 的字节不会变，可以 immutable。真要换了（前缀升 v2 即可）。
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+    res.send(fs.readFileSync(file))
+  } catch {
+    // 索引有、盘上没有（被删/权限）：如实 404，别用 500 糊过去
+    res.status(404).json({ error: '图片文件缺失', code: 'IMAGE_NOT_FOUND' })
+  }
 })
 
 // 挂载「一键生成美女图片」路由（实现见 server/src/image.ts）

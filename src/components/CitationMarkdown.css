@@ -35,12 +35,21 @@
   background: #f1f5f9;
 }
 
+/*
+ * 浮层挂在 body 上（portal）+ fixed 定位，落点由 JS 按角标坐标算（见 CitationMarkdown.tsx）：
+ * 角标常在 .msg__content table 的单元格里，那张表是 overflow-x:auto 的滚动容器，
+ * absolute 浮层会被它裁成一条。z-index 30：要盖住 .topbar 的 10，但留在 .wspick 的 40 之下。
+ */
 .cite-popover {
-  position: absolute;
-  z-index: 20;
-  left: 0;
-  top: calc(100% + 6px);
+  position: fixed;
+  /* 元素本体是 <span>（不会给正文插入块级标签），显式 block 化，
+     别依赖「绝对定位会自动 blockify」这条隐式规则 */
+  display: block;
+  z-index: 30;
   width: min(320px, 80vw);
+  /* 长 snippet 自己滚，别长成一张盖满屏幕的卡片 */
+  max-height: min(22rem, 60vh);
+  overflow-y: auto;
   padding: 0.65rem 0.75rem;
   border: 1px solid #cbd5e1;
   border-radius: 10px;
@@ -51,6 +60,13 @@
   color: #334155;
   text-align: left;
   white-space: normal;
+  /* 挂到 body 后拿不到 .app 的字体，得自带一份（同 .app 的字族栈） */
+  font-family:
+    'Segoe UI',
+    'PingFang SC',
+    'Hiragino Sans GB',
+    'Microsoft YaHei',
+    sans-serif;
 }
 
 .cite-popover strong {
@@ -72,16 +88,56 @@
   word-break: break-all;
 }
 
+/* 标题可点：跳到来源文档核对召回。strong 的样式由上面那条规则负责 */
+.cite-popover__title {
+  display: block;
+  text-decoration: none;
+  cursor: pointer;
+  /* 继承卡片颜色：不然 <a> 默认的蓝色会把标题也染蓝 */
+  color: inherit;
+  overflow-wrap: anywhere;
+}
+
+.cite-popover__title:hover strong {
+  text-decoration: underline;
+}
+
+.cite-popover__jump {
+  display: block;
+  margin: 0.15rem 0 0.35rem;
+  color: #2563eb;
+  font-size: 0.75rem;
+}
+
 .cite-popover__meta {
   display: block;
   margin-bottom: 0.35rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.72rem;
   color: #64748b;
+  /* 路径/表名是长串无空格 token，不强制断行会顶出卡片（截图里那段糊在表格上的就是它） */
+  overflow-wrap: anywhere;
 }
 
+/* snippet 是原文块，换行保留；长 token 允许断行，不然 320px 装不下 mcp_caller 这种标识符 */
 .cite-popover__snippet {
   margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * 浮层里的图（图片命中时用来核对「引的是哪张」）。
+ * 复用 ChatImage 的 .msg__img，但它默认按气泡宽度铺满，这里压到浮层宽度内（320px）。
+ */
+.cite-popover .msg__img {
+  display: block;
+  max-width: 100%;
+  max-height: 200px;
+  margin: 0 0 0.4rem;
+  border: 1px solid #eef2f6;
+  border-radius: 6px;
+  background: #f8fafc;
 }
 
 .cite-popover--miss {

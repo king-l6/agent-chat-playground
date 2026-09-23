@@ -198,6 +198,17 @@ export type ImageSearchHit = {
   citation: number
 }
 
+/**
+ * 某篇文档里的图，按索引里的顺序（≈ 正文出现顺序）。
+ *
+ * 给「按文档挂图」那条通道用：**不碰 CLIP**。理由见 retrieve.ts 的 attachDocImages——
+ * 中文问句对图的余弦没有判别力，用余弦挑图会挑错；而「这篇文档里有哪几张图」
+ * 是确定的事实，不需要任何模型。
+ */
+export function listDocImages(docId: string): ImageIndexItem[] {
+  return ensureImageIndexLoaded().filter((it) => it.docId === docId)
+}
+
 export async function searchImages(
   query: string,
   topK: number,

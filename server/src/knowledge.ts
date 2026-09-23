@@ -51,12 +51,18 @@ export type SearchHit = KnowledgeChunk & {
   /** rerank 的字面重叠分；score 是 RRF 融合分，两个分开看才看得出「为什么留下」 */
   rerank?: number
   /**
+   * 图片命中专有：本站直出的相对地址（见 imageCache.imageServePath）。
+   * 文本命中不带；模型想给用户看原图时贴的就是它。
+   */
+  imageUrl?: string
+  /**
    * 这条是怎么进来的：
    * recall  = 正常召回（向量 / 关键词 / RRF 融合；score 是 RRF 融合分）
    * recency = 「最近/最新」时间意图补召的最新几期（score 是该块对问句的余弦）
-   * 两条通道的分不是一个量纲，标出来免得看的人以为分低就是差。
+   * image   = 用户要图时按来源文档挂上来的图（score 恒为 0：不是按分进来的）
+   * 几条通道的分不是一个量纲，标出来免得看的人以为分低就是差。
    */
-  via?: 'recall' | 'recency'
+  via?: 'recall' | 'recency' | 'image'
 }
 
 export { DATA_DIR }

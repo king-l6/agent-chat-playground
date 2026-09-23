@@ -11,6 +11,8 @@ export type CitationHit = {
   docPath?: string
   title: string
   snippet: string
+  /** 图片命中才有：本地直出的相对地址（角标浮层里拿它显示缩略图） */
+  imageUrl?: string
 }
 
 /**

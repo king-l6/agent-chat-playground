@@ -105,6 +105,32 @@
   background: #f8fafc;
 }
 
+/*
+ * 助手贴的原图（本地直出 /api/image/cache/<id>）。
+ * 同款写法见 DocumentsPage.css 的 .wiki__md img，两处保持一致：
+ * 图片最大只撑满气泡宽度，不把 860px 的聊天栏顶宽。
+ */
+.msg__content img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.5rem 0;
+  border: 1px solid #eef2f6;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+/* 图没取到时的兜底：宁可说一句「加载不了」，也不留一个裂图图标 */
+.msg__img-fallback {
+  display: block;
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  color: #64748b;
+  font-size: 0.85rem;
+}
+
 .muted {
   color: #94a3b8;
 }

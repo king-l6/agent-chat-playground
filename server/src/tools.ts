@@ -54,7 +54,7 @@ export const toolDefinitions: ChatCompletionTool[] = [
     function: {
       name: 'search_notes',
       description:
-        '在本地知识库中检索文档片段（内置说明、求职手册、用户上传的 md/txt）。当用户问项目、SSE、简历缺口、上传文档内容、怎么学等问题时调用。query 可以是原句或关键词。',
+        '在本地知识库中检索文档片段（内置说明、求职手册、用户上传的 md/txt），也会返回文档里带的图片条目。当用户问项目、SSE、简历缺口、上传文档内容、怎么学等问题时调用；用户要原图、截图、配图时必须调用它——图片条目（title 以「图片 · 」开头）带 imageUrl，没查过就别说自己给不出图。query 可以是原句或关键词。',
       parameters: {
         type: 'object',
         properties: {
@@ -268,6 +268,8 @@ async function searchNotes(query: string, userQuery?: string): Promise<string> {
           docPath: h.docPath,
           title: h.title,
           via: h.via,
+          /** 图片命中才有：本站直出的原图地址，可以贴进回答里 */
+          imageUrl: h.imageUrl,
           snippet: matched.length > 200 ? `${matched.slice(0, 200)}…` : matched,
           text: forModel.length > 900 ? `${forModel.slice(0, 900)}…` : forModel,
           score: h.score,
@@ -275,7 +277,7 @@ async function searchNotes(query: string, userQuery?: string): Promise<string> {
         }
       }),
       instruction:
-        '已有检索结果。请立即根据 hits[].text 给出最终中文回答，句末标注 [citation]，不要再次调用 search_notes。text 可能含命中块的前后邻接，引用编号仍对应该条 id。回答时用 hits[].docName 说明来源文档；带期次的文档（周报/月报/季度小结）必须写清是哪一期，不要含糊成「最近的周报」。',
+        '已有检索结果。请立即根据 hits[].text 给出最终中文回答，句末标注 [citation]，不要再次调用 search_notes。text 可能含命中块的前后邻接，引用编号仍对应该条 id。回答时用 hits[].docName 说明来源文档；带期次的文档（周报/月报/季度小结）必须写清是哪一期，不要含糊成「最近的周报」。命中里 title 以「图片 · 」开头的是图片条目（score 是 0 属正常，不是「不相关」）。这两种情况都要用 markdown 图片语法贴出该条的 hits[].imageUrl，例如 ![](/api/image/cache/img_xxxxxxxxxxxxxxxx)：①用户要原图、配图、截图；②该图是某条命中正文自己引用的（那条的结论就是靠这张图来的，它的 text 写着「原图见 imageUrl」）——这种不用等用户开口，直接贴出来，别让答案缺一半。一次最多贴 2 张，贴哪一张看该条的 title 与图中文字跟问题对不对得上；贴图那句仍要标 [citation]；不要贴 hits[].text 里的远程链接，也不要说「我拿不到图片」。',
     },
     null,
     2,

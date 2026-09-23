@@ -68,6 +68,40 @@ export function findCachedImage(url: string): string | null {
 }
 
 /**
+ * 本地直出图片的路由前缀。
+ * 检索时拼给模型的地址和 index.ts 注册的路由都读这个常量，避免两处写法各写一遍再漂移。
+ */
+export const IMAGE_ROUTE = '/api/image/cache'
+
+/** 图片 id 的形状：`img_` + sha256(url) 前 16 位（同 imageIndex 的 imageId） */
+const IMAGE_ID_RE = /^img_[0-9a-f]{16}$/
+
+export function isImageId(id: string): boolean {
+  return IMAGE_ID_RE.test(id)
+}
+
+/**
+ * id → 缓存文件的绝对路径，没有返回 null。
+ *
+ * **故意不查 image-index.json**：readDisk() 在模型名对不上时返回空数组，
+ * 那会让全部图片 404，而字节明明还在盘上。id 本身就能定位文件（命名规则就是
+ * `img_<hash><ext>`），多挂一层索引只是多一个失效点。
+ */
+export function imageFileById(id: string): string | null {
+  if (!IMAGE_ID_RE.test(id)) return null
+  for (const ext of Object.keys(EXT_MIME)) {
+    const file = path.join(IMAGE_CACHE_DIR, `${id}${ext}`)
+    if (fs.existsSync(file)) return file
+  }
+  return null
+}
+
+/** 给模型的本地直出地址。是站内相对路径，前端按 API base 补成绝对地址（src/lib/apiUrl.ts） */
+export function imageServePath(id: string): string {
+  return `${IMAGE_ROUTE}/${id}`
+}
+
+/**
  * 取这张图的本地路径，没有就下载一次。
  * 失败返回 null，且不写任何东西——下次入库会重试。
  */
