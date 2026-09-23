@@ -25,6 +25,9 @@ import {
 } from './sessionStore';
 import './components/AppShell.css';
 
+/** 输入框自动长高的上限（px）。和 AppShell.css 里 .composer textarea 的 max-height 必须一致 */
+const COMPOSER_MAX_HEIGHT = 180
+
 function pageFromHash(): 'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery' {
   const path = location.hash.replace(/^#\/?/, '').split('?')[0]
   if (path.startsWith('canvas') || path.startsWith('workflow')) return 'canvas'
@@ -60,6 +63,8 @@ export default function App() {
   const abortMap = useRef(new Map<string, AbortController>());
   /** 锚点：当前会话有新消息就滚到底部 */
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  /** 输入框本体：自动长高要直接改它的 style.height */
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const active = sessions.find((s) => s.id === activeId) ?? sessions[0];
   const messages = active?.messages ?? [];
   const input = active ? (drafts[active.id] ?? '') : '';
@@ -99,6 +104,18 @@ export default function App() {
     }, 300)
     return () => window.clearTimeout(timer)
   }, [activeId, sessions])
+
+  /*
+   * 输入框跟着内容长高：先归零再读 scrollHeight（不归零的话只能长不能缩，
+   * 发完消息清空后输入框会一直停在高位）。超过上限就交给 CSS 的 max-height 滚动。
+   * 依赖里带上 active.id：切会话时草稿换了，高度也得跟着换。
+   */
+  useEffect(() => {
+    const el = composerRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_HEIGHT)}px`
+  }, [input, active?.id])
 
   // 进页先 ping 一下健康检查
   useEffect(() => {
@@ -390,15 +407,35 @@ export default function App() {
           }}
         >
           <textarea
+            ref={composerRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="输入问题，Enter 发送，Shift+Enter 换行"
             rows={2}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
+              /*
+               * 输入法组词中（拼音还没上屏）时，Enter 是「选词」不是「发送」。
+               * 不判 isComposing 的话，敲拼音按 Enter 会把半截字母当问题发出去。
+               * keyCode 229 是部分输入法/旧浏览器只给 keyCode 的老路径，一起挡掉。
+               */
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return
+              if (e.key !== 'Enter') return
+              if (e.shiftKey) {
+                // 显式插换行：不依赖默认行为——输入法活跃时默认的换行会被吃掉
                 e.preventDefault()
-                void onSend()
+                const el = e.currentTarget
+                const start = el.selectionStart ?? el.value.length
+                const end = el.selectionEnd ?? start
+                setInput(`${el.value.slice(0, start)}\n${el.value.slice(end)}`)
+                // 受控组件：等 React 把新 value 写进 DOM 再挪光标，否则设了也被覆盖
+                requestAnimationFrame(() => {
+                  el.selectionStart = start + 1
+                  el.selectionEnd = start + 1
+                })
+                return
               }
+              e.preventDefault()
+              void onSend()
             }}
           />
           {activeBusy ? (

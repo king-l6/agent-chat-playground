@@ -777,9 +777,12 @@ a.badge {
 
 .composer textarea {
   width: 100%;
-  resize: vertical;
+  /* 高度由 App.tsx 按内容算（COMPOSER_MAX_HEIGHT 必须和这里的 max-height 一致），
+     所以禁掉手动拖拽——否则拖大之后一打字就被拉回去，反而是个 bug */
+  resize: none;
   min-height: 64px;
   max-height: 180px;
+  overflow-y: auto;
   border: 1px solid #cbd5e1;
   border-radius: 12px;
   padding: 0.75rem 0.85rem;
