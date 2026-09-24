@@ -13,6 +13,7 @@ import { CanvasPage } from './components/CanvasPage';
 import { WorkspaceBar } from './components/WorkspaceBar';
 import { SettingsPage } from './components/SettingsPage';
 import { DeliveryPage } from './components/DeliveryPage';
+import { VideoPage } from './components/VideoPage';
 import { AppSidebar } from './components/AppSidebar';
 import { SessionList } from './components/SessionList';
 import {
@@ -28,7 +29,7 @@ import './components/AppShell.css';
 /** 输入框自动长高的上限（px）。和 AppShell.css 里 .composer textarea 的 max-height 必须一致 */
 const COMPOSER_MAX_HEIGHT = 180
 
-function pageFromHash(): 'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery' {
+function pageFromHash(): 'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery' | 'video' {
   const path = location.hash.replace(/^#\/?/, '').split('?')[0]
   if (path.startsWith('canvas') || path.startsWith('workflow')) return 'canvas'
   if (path.startsWith('memory')) return 'memory'
@@ -36,6 +37,7 @@ function pageFromHash(): 'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' 
   if (path.startsWith('documents') || path.startsWith('knowledge')) return 'documents'
   if (path.startsWith('settings') || path.startsWith('config')) return 'settings'
   if (path.startsWith('delivery')) return 'delivery'
+  if (path.startsWith('video')) return 'video'
   return 'chat'
 }
 
@@ -54,7 +56,7 @@ export default function App() {
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [mcp, setMcp] = useState<McpPublic | null>(null);
   const [page, setPage] = useState<
-    'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery'
+    'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery' | 'video'
   >(pageFromHash);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('agentos.rail') === '1');
   /** 顶部/底部错误条 */
@@ -448,6 +450,7 @@ export default function App() {
             </button>
           )}
         </form>
+        <WorkspaceBar />
       </footer>
     </div>
   )
@@ -462,7 +465,6 @@ export default function App() {
         onToggle={() => setCollapsed((v) => !v)}
       />
       <div className="app__body">
-        <WorkspaceBar />
         {page === 'chat' && (
           <div className="app__chat">
             <SessionList
@@ -485,6 +487,7 @@ export default function App() {
         {page === 'vectors' && <VectorsPage />}
         {page === 'canvas' && <CanvasPage />}
         {page === 'delivery' && <DeliveryPage />}
+        {page === 'video' && <VideoPage />}
         {page === 'settings' && (
           <SettingsPage
             onSaved={(next) => {

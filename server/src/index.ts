@@ -68,6 +68,8 @@ import {
   type MemoryType,
 } from './memory/store.js'
 import { MEMORY_TOP_K, MIN_MEMORY_COSINE, rankMemories } from './memory/recall.js'
+import { filmPath, isGuardError, openTask, publicVideo, resumeVideoTasks, retryTask } from './video/runtime.js'
+import { buildStoryboard } from './video/storyboard.js'
 
 dotenv.config({ path: path.join(REPO_ROOT, '.env'), override: true })
 if (process.env.PLAYGROUND_DATA) {
@@ -658,6 +660,55 @@ app.post('/api/mcp/import-claude', async (_req, res) => {
 function parseSeat(raw: unknown): Seat | null {
   return raw === 'pm' || raw === 'dev' || raw === 'qa' ? raw : null
 }
+
+app.get('/api/video', (_req, res) => {
+  res.json(publicVideo())
+})
+
+app.post('/api/video/storyboard', async (req, res) => {
+  const script = typeof req.body?.script === 'string' ? req.body.script.trim() : ''
+  if (script.length < 8) {
+    res.status(400).json({ error: '剧本至少写一句，8 个字以上' })
+    return
+  }
+  try {
+    const board = await buildStoryboard(script)
+    res.json(board)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
+  }
+})
+
+app.post('/api/video/tasks', async (req, res) => {
+  const script = typeof req.body?.script === 'string' ? req.body.script : ''
+  try {
+    const opened = await openTask(script)
+    res.status(opened.reused ? 200 : 201).json(opened)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(isGuardError(err) ? 429 : 400).json({ error: message })
+  }
+})
+
+app.post('/api/video/tasks/:id/retry', (req, res) => {
+  try {
+    res.json({ task: retryTask(req.params.id) })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    const missing = message === '任务不存在'
+    res.status(missing ? 404 : isGuardError(err) ? 429 : 400).json({ error: message })
+  }
+})
+
+app.get('/api/video/tasks/:id/film', (req, res) => {
+  const file = filmPath(req.params.id)
+  if (!file) {
+    res.status(404).json({ error: '成片还没有' })
+    return
+  }
+  res.sendFile(file)
+})
 
 app.get('/api/delivery', (_req, res) => {
   res.json(publicDelivery())
@@ -1290,6 +1341,11 @@ export function startServer(): Promise<void> {
         }
       } catch (err) {
         console.warn('[memory] 启动归档扫描失败:', err instanceof Error ? err.message : err)
+      }
+      try {
+        resumeVideoTasks()
+      } catch (err) {
+        console.warn('[video] 恢复中断任务失败:', err instanceof Error ? err.message : err)
       }
       void reconnectMcp().then((mcp) => {
         if (!mcp.enabled) return

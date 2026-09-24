@@ -141,3 +141,81 @@ export function workspaceWrite(relPath: string, content: string) {
   fs.writeFileSync(file, content, 'utf8')
   return { path: relPath.split(path.sep).join('/'), bytes }
 }
+
+/** 给模型看的工作区摘要：路径 + 根目录清单 + README 开头。未绑工作区返回 null */
+export type WorkspaceDigest = {
+  root: string
+  name: string
+  entries: string[]
+  more: number
+  readme: { file: string; excerpt: string } | null
+}
+
+/** 根目录里这些不给模型看：不是项目信息，还会把清单撑爆（node_modules 一个就上千条） */
+const NOISE = new Set([
+  'node_modules',
+  '.git',
+  '.next',
+  'dist',
+  'build',
+  'out',
+  'coverage',
+  '.venv',
+  'venv',
+  '__pycache__',
+  '.turbo',
+  'target',
+  '.cache',
+  'vendor',
+  '.DS_Store',
+])
+const README_CANDIDATES = [
+  'README.md',
+  'readme.md',
+  'Readme.md',
+  'README.MD',
+  'README.markdown',
+  'README.txt',
+  'README',
+]
+const DIGEST_ENTRIES = 40
+const README_EXCERPT = 1200
+
+/**
+ * 为什么要有这个：模型在 system prompt 里拿不到工作区，用户问「这个项目是干什么的」
+ * 它只能去检索知识库，答不到点上（实测：连了代码库还是答「不敢替你认定是哪个」）。
+ *
+ * 照 memoryBlockFor 的口径做 fail-open：任何一步读不动就少给一点，
+ * 绝不把异常抛进聊天链路——工作区信息是锦上添花，不能因为它挂掉整轮对话。
+ */
+export function workspaceDigest(): WorkspaceDigest | null {
+  const base = root
+  if (!base) return null
+  const digest: WorkspaceDigest = {
+    root: base,
+    name: path.basename(base) || base,
+    entries: [],
+    more: 0,
+    readme: null,
+  }
+  try {
+    // workspaceList 走的是同一套沙箱校验，这里直接复用，不自己 readdir
+    const visible = workspaceList('.').filter((entry) => !NOISE.has(entry.name))
+    digest.entries = visible
+      .slice(0, DIGEST_ENTRIES)
+      .map((entry) => (entry.kind === 'dir' ? `${entry.name}/` : entry.name))
+    digest.more = Math.max(0, visible.length - DIGEST_ENTRIES)
+  } catch {
+    /* 列不出来就只给路径 */
+  }
+  // README 单独探盘找，不靠 entries：它可能被挤到 40 条之外
+  const file = README_CANDIDATES.find((name) => fs.existsSync(path.join(base, name)))
+  if (file) {
+    try {
+      digest.readme = { file, excerpt: workspaceRead(file).slice(0, README_EXCERPT) }
+    } catch {
+      /* 不是文件 / 太大 / 读不动，都当没有 README */
+    }
+  }
+  return digest
+}

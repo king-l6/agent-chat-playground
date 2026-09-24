@@ -1,10 +1,10 @@
-type PageId = 'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery'
+type PageId = 'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery' | 'video'
 
 type NavItem = {
   id: PageId
   href: string
   label: string
-  icon: 'chat' | 'doc' | 'memory' | 'agent' | 'vector' | 'ship' | 'gear'
+  icon: 'chat' | 'doc' | 'memory' | 'agent' | 'vector' | 'ship' | 'gear' | 'film'
 }
 
 const PRIMARY: NavItem[] = [
@@ -13,6 +13,7 @@ const PRIMARY: NavItem[] = [
   { id: 'memory', href: '#/memory', label: '记忆', icon: 'memory' },
   { id: 'canvas', href: '#/canvas', label: '智能体', icon: 'agent' },
   { id: 'delivery', href: '#/delivery', label: '发布', icon: 'ship' },
+  { id: 'video', href: '#/video', label: '视频', icon: 'film' },
 ]
 
 const HELP: NavItem[] = [
@@ -79,6 +80,14 @@ function Icon({ name }: { name: NavItem['icon'] }) {
     return (
       <svg {...props}>
         <path d="M4 12h16l-2 6H6zM12 4v8M8 7h8" />
+      </svg>
+    )
+  }
+  if (name === 'film') {
+    return (
+      <svg {...props}>
+        <rect x="3" y="6" width="18" height="12" rx="1.5" />
+        <path d="M7 6v12M17 6v12M3 10h4M3 14h4M17 10h4M17 14h4" />
       </svg>
     )
   }

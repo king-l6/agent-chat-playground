@@ -147,7 +147,9 @@
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  /* 原来第一行 auto 是留给顶部的 .wsbar；工作区条挪到输入框下方后这层只剩一个子元素，
+     留着两行会让它落进 auto 行、撑不满高度 */
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
 }
 
@@ -155,6 +157,7 @@
 .app__body > .vd,
 .app__body > .wf,
 .app__body > .desk,
+.app__body > .reel,
 .app__body > .kb,
 .app__body > .settings {
   min-height: 0;
@@ -636,9 +639,8 @@ a.badge {
 }
 
 .app--desk .wsbar {
-  padding: 0.28rem 0.8rem;
-  background: #2a241c;
-  border-bottom-color: #3d3429;
+  /* 底色和边框由 .composer-wrap .wsbar 统一处理（它在底部是一条，不该整块铺底），
+     这里只定深色主题下的文字色 */
   color: #cfc4b0;
 }
 
@@ -647,8 +649,6 @@ a.badge {
 }
 
 .app--desk .wsbar--on {
-  background: #243328;
-  border-bottom-color: #355243;
   color: #d7e7d6;
 }
 
@@ -741,6 +741,23 @@ a.badge {
   border-top: 1px solid #e2e8f0;
   background: rgba(255, 255, 255, 0.92);
   padding: 0.75rem 1rem 1rem;
+}
+
+/*
+ * 工作区条现在挂在输入框下方（原来是横跨全宽的顶栏）。
+ * 全宽 + 下边框 + 绿底那套顶栏样式搬到这里会显得错位，所以在定位到 composer-wrap 里时收回来：
+ * 跟 composer 同宽居中、不要下边框（它下面是页面边缘了），已连接的状态只用绿色文字表达。
+ */
+.composer-wrap .wsbar {
+  max-width: 860px;
+  margin: 0.55rem auto 0;
+  padding: 0;
+  background: transparent;
+  border-bottom: none;
+}
+
+.composer-wrap .wsbar--on {
+  background: transparent;
 }
 
 .hints {
