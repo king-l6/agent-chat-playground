@@ -6,12 +6,13 @@ import crypto from 'node:crypto'
 import path from 'node:path'
 import { readJsonFile, writeJsonAtomic } from '../jsonStore.js'
 import { DATA_DIR } from '../paths.js'
+import { IMAGE_MODEL } from './still.js'
 import type { Shot, VideoGuard, VideoTask } from './types.js'
 
 export const VIDEO_DIR = path.join(DATA_DIR, 'video')
 const TASKS_FILE = path.join(VIDEO_DIR, 'tasks.json')
 
-/** 本地 ffmpeg 不花钱，护栏先按 0 记。接上按秒计费的供应商后，这里才会计入。 */
+/** 日限额按图片记账单价累计。ffmpeg 拼接本身不另计。 */
 export const DAILY_CAP_CENTS = 2_000
 export const MAX_CONCURRENT = 1
 
@@ -40,7 +41,7 @@ function save(disk: Disk): void {
 }
 
 export function scriptKey(script: string): string {
-  return crypto.createHash('sha256').update(script.trim()).digest('hex').slice(0, 16)
+  return crypto.createHash('sha256').update(`${IMAGE_MODEL}\n${script.trim()}`).digest('hex').slice(0, 16)
 }
 
 export function taskDir(id: string): string {
@@ -105,7 +106,7 @@ export function createTask(input: {
     status: 'queued',
     stage: 'storyboard',
     shots: input.shots,
-    provider: 'local-ffmpeg',
+    provider: IMAGE_MODEL,
     live: input.live,
     attempts: 0,
     createdAt: now,
@@ -115,6 +116,34 @@ export function createTask(input: {
   disk.tasks.unshift(task)
   save(disk)
   return task
+}
+
+export function removeTask(id: string): VideoTask {
+  const disk = load()
+  const idx = disk.tasks.findIndex((t) => t.id === id)
+  if (idx < 0) throw new Error('任务不存在')
+  const task = disk.tasks[idx]
+  if (task.status === 'running' || task.status === 'queued') {
+    throw new Error('这条还在做，做完再关')
+  }
+  disk.tasks.splice(idx, 1)
+  save(disk)
+  return task
+}
+
+let spendQueue: Promise<void> = Promise.resolve()
+
+export function addSpend(cents: number, taskId?: string): void {
+  if (cents <= 0) return
+  spendQueue = spendQueue.then(() => {
+    const disk = load()
+    disk.spent.cents += cents
+    if (taskId) {
+      const task = disk.tasks.find((item) => item.id === taskId)
+      if (task) task.costCents += cents
+    }
+    save(disk)
+  })
 }
 
 export function patchTask(id: string, patch: Partial<VideoTask>): VideoTask | null {

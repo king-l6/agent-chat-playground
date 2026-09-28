@@ -24,9 +24,11 @@
     "lint": "oxlint"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.3.4",
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/client": "^2.0.0",
     "@xyflow/react": "^12.11.6",
+    "antd": "^6.6.5",
     "axios": "^1.19.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",

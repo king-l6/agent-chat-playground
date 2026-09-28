@@ -68,8 +68,13 @@ import {
   type MemoryType,
 } from './memory/store.js'
 import { MEMORY_TOP_K, MIN_MEMORY_COSINE, rankMemories } from './memory/recall.js'
-import { filmPath, isGuardError, openTask, publicVideo, resumeVideoTasks, retryTask } from './video/runtime.js'
-import { buildStoryboard } from './video/storyboard.js'
+import { dropTask, filmPath, isGuardError, openTask, publicVideo, resumeVideoTasks, retryTask, stillPath } from './video/runtime.js'
+import { addSpend } from './video/store.js'
+import { drawRevision, IMAGE_CENTS, renderReference } from './video/still.js'
+import { bibleImageFile, fileDigest, readBible, readLibrary, addLibraryImage, saveBibleImage, writeBible, type SeriesBible } from './video/bible.js'
+import { reviseLook, type LookKind } from './video/look.js'
+import { buildStoryboard, draftScript } from './video/storyboard.js'
+import { addVoice, listVoices, removeVoice, renameVoice, voicePath } from './video/voice.js'
 
 dotenv.config({ path: path.join(REPO_ROOT, '.env'), override: true })
 if (process.env.PLAYGROUND_DATA) {
@@ -665,6 +670,184 @@ app.get('/api/video', (_req, res) => {
   res.json(publicVideo())
 })
 
+app.post('/api/video/draft', async (req, res) => {
+  const messages = Array.isArray(req.body?.messages) ? req.body.messages : []
+  const talk = messages
+    .filter((m: { role?: unknown; content?: unknown }) => m && (m.role === 'user' || m.role === 'assistant'))
+    .map((m: { role: 'user' | 'assistant'; content?: unknown }) => ({
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content : '',
+    }))
+    .filter((m: { content: string }) => m.content.trim())
+  if (!talk.some((m: { role: string }) => m.role === 'user')) {
+    res.status(400).json({ error: '先说你想拍什么' })
+    return
+  }
+  try {
+    const draft = await draftScript(talk, typeof req.body?.script === 'string' ? req.body.script : '')
+    res.json(draft)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
+  }
+})
+
+app.get('/api/video/bible', (_req, res) => {
+  res.json(readBible())
+})
+
+app.put('/api/video/bible', (req, res) => {
+  const body = req.body
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: '设定格式不对' })
+    return
+  }
+  res.json(writeBible(body as SeriesBible))
+})
+
+const bibleUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } })
+
+app.post('/api/video/bible/images', (req, res) => {
+  bibleUpload.single('file')(req, res, (err) => {
+    if (err || !req.file) {
+      res.status(400).json({ error: '图片请小于 8MB 的 png、jpg 或 webp' })
+      return
+    }
+    try {
+      res.json({ image: saveBibleImage(req.file.buffer) })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      res.status(400).json({ error: message })
+    }
+  })
+})
+
+app.get('/api/video/bible/images/:name', (req, res) => {
+  const file = bibleImageFile(req.params.name)
+  if (!file) {
+    res.status(404).json({ error: '没有这张参考图' })
+    return
+  }
+  res.sendFile(file)
+})
+
+app.post('/api/video/bible/images/generate', async (req, res) => {
+  const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : ''
+  const size = req.body?.size === '1536x1024' ? '1536x1024' : '1024x1024'
+  if (prompt.length < 4) {
+    res.status(400).json({ error: '先写外形或场景，再生成参考图' })
+    return
+  }
+  try {
+    const bytes = await renderReference(prompt, size)
+    const image = saveBibleImage(bytes)
+    addSpend(IMAGE_CENTS)
+    res.json({ image })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error('[bible-image]', message)
+    res.status(500).json({ error: message })
+  }
+})
+
+app.post('/api/video/bible/images/draw', async (req, res) => {
+  const kind = req.body?.kind
+  const look = typeof req.body?.look === 'string' ? req.body.look.trim() : ''
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : ''
+  if ((kind !== 'character' && kind !== 'outfit' && kind !== 'place') || look.length < 4) {
+    res.status(400).json({ error: '先有描述，再出图' })
+    return
+  }
+  const base = typeof req.body?.base === 'string' ? bibleImageFile(req.body.base) : null
+  const listed = Array.isArray(req.body?.images) ? req.body.images.filter((name: unknown) => typeof name === 'string') : []
+  const refs = base ? [base] : listed.map((name: string) => bibleImageFile(name)).filter((file: string | null): file is string => Boolean(file)).slice(0, 4)
+  const lead = kind === 'character' ? '角色定妆，单人正面半身，纯色浅灰背景' : kind === 'outfit' ? '单件服装平铺，纯色浅灰背景，不要人物' : '空镜场景，不要人物'
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : ''
+  const prompt = [lead, name, look, message ? `按这个要求改：${message}` : ''].filter(Boolean).join('。')
+  try {
+    const bytes = await drawRevision(prompt, kind === 'place' ? '1536x1024' : '1024x1024', refs)
+    const image = saveBibleImage(bytes)
+    addSpend(IMAGE_CENTS)
+    res.json({ image })
+  } catch (err) {
+    const messageText = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: messageText })
+  }
+})
+
+app.get('/api/video/bible/library', (_req, res) => {
+  res.json({ images: readLibrary() })
+})
+
+app.post('/api/video/bible/library', (req, res) => {
+  const name = typeof req.body?.image === 'string' ? req.body.image : ''
+  try {
+    res.json({ images: addLibraryImage(name) })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: message })
+  }
+})
+
+app.post('/api/video/bible/look', async (req, res) => {
+  const kind = req.body?.kind
+  if (kind !== 'character' && kind !== 'outfit' && kind !== 'place') {
+    res.status(400).json({ error: '不知道要写角色、衣服还是场景' })
+    return
+  }
+  const images = Array.isArray(req.body?.images) ? req.body.images.filter((name: unknown) => typeof name === 'string') : []
+  try {
+    const look = await reviseLook({
+      kind: kind as LookKind,
+      name: typeof req.body?.name === 'string' ? req.body.name : '',
+      look: typeof req.body?.look === 'string' ? req.body.look : '',
+      images,
+      message: typeof req.body?.message === 'string' ? req.body.message : '',
+    })
+    res.json({ look })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: message })
+  }
+})
+
+app.post('/api/video/bible/images/used', (req, res) => {
+  const names = Array.isArray(req.body?.images) ? req.body.images.filter((name: unknown) => typeof name === 'string') : []
+  const shots = Array.isArray(req.body?.shots) ? req.body.shots : []
+  const byDigest = new Map<string, string>()
+  for (const name of names) {
+    const file = bibleImageFile(name)
+    if (file && !byDigest.has(fileDigest(file))) byDigest.set(fileDigest(file), name)
+  }
+  const used: Array<{ key: string; image: string }> = []
+  for (const shot of shots) {
+    const taskId = typeof shot?.taskId === 'string' ? shot.taskId : ''
+    const index = Number(shot?.index)
+    const file = stillPath(taskId, index)
+    if (!file) continue
+    const image = byDigest.get(fileDigest(file))
+    if (!image) continue
+    used.push({ key: `${taskId}-${index}`, image })
+  }
+  res.json({ used })
+})
+
+app.post('/api/video/bible/images/from-shot', (req, res) => {
+  const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId : ''
+  const index = Number(req.body?.index)
+  const file = stillPath(taskId, index)
+  if (!file) {
+    res.status(404).json({ error: '这镜还没有图' })
+    return
+  }
+  try {
+    res.json({ image: saveBibleImage(fs.readFileSync(file)) })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: message })
+  }
+})
+
 app.post('/api/video/storyboard', async (req, res) => {
   const script = typeof req.body?.script === 'string' ? req.body.script.trim() : ''
   if (script.length < 8) {
@@ -680,6 +863,51 @@ app.post('/api/video/storyboard', async (req, res) => {
   }
 })
 
+app.get('/api/video/voices', (_req, res) => {
+  res.json({ voices: listVoices() })
+})
+
+app.post('/api/video/voices', async (req, res) => {
+  const url = typeof req.body?.url === 'string' ? req.body.url : ''
+  const name = typeof req.body?.name === 'string' ? req.body.name : ''
+  try {
+    const voice = await addVoice(name, url)
+    res.status(201).json(voice)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: message })
+  }
+})
+
+app.patch('/api/video/voices/:id', (req, res) => {
+  const name = typeof req.body?.name === 'string' ? req.body.name : ''
+  try {
+    const voice = renameVoice(req.params.id, name)
+    if (!voice) {
+      res.status(404).json({ error: '没有这段音色' })
+      return
+    }
+    res.json({ voices: listVoices() })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: message })
+  }
+})
+
+app.delete('/api/video/voices/:id', (req, res) => {
+  removeVoice(req.params.id)
+  res.json({ voices: listVoices() })
+})
+
+app.get('/api/video/voices/:id/audio', (req, res) => {
+  const file = voicePath(req.params.id)
+  if (!fs.existsSync(file)) {
+    res.status(404).json({ error: '没有这段音色' })
+    return
+  }
+  res.sendFile(file)
+})
+
 app.post('/api/video/tasks', async (req, res) => {
   const script = typeof req.body?.script === 'string' ? req.body.script : ''
   try {
@@ -691,6 +919,16 @@ app.post('/api/video/tasks', async (req, res) => {
   }
 })
 
+app.delete('/api/video/tasks/:id', (req, res) => {
+  try {
+    dropTask(req.params.id)
+    res.json({ ok: true })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(message === '任务不存在' ? 404 : 400).json({ error: message })
+  }
+})
+
 app.post('/api/video/tasks/:id/retry', (req, res) => {
   try {
     res.json({ task: retryTask(req.params.id) })
@@ -699,6 +937,15 @@ app.post('/api/video/tasks/:id/retry', (req, res) => {
     const missing = message === '任务不存在'
     res.status(missing ? 404 : isGuardError(err) ? 429 : 400).json({ error: message })
   }
+})
+
+app.get('/api/video/tasks/:id/shots/:index', (req, res) => {
+  const file = stillPath(req.params.id, Number(req.params.index))
+  if (!file) {
+    res.status(404).json({ error: '这镜还没有图' })
+    return
+  }
+  res.sendFile(file)
 })
 
 app.get('/api/video/tasks/:id/film', (req, res) => {
