@@ -30,6 +30,32 @@
   margin-bottom: 0.35rem;
 }
 
+.msg__process {
+  margin: 0.35rem 0 0.65rem;
+  padding: 0.4rem 0.55rem 0.5rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.msg__process--on {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.msg__process-head,
+.msg__process summary {
+  margin: 0 0 0.3rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.msg__process summary::-webkit-details-marker {
+  display: none;
+}
+
 .msg__content {
   line-height: 1.65;
   color: #0f172a;
@@ -44,6 +70,65 @@
 .msg__content ul {
   margin: 0.4rem 0;
   padding-left: 1.2rem;
+}
+
+/*
+ * GFM 表格（remark-gfm）：模型汇总数据时爱用表格，列多到 6~8 列很常见，
+ * 而聊天栏最宽只有 860px。所以表格自己当滚动容器（display:block + overflow-x），
+ * 而不是把整个气泡撑宽。同款写法见 DocumentsPage.css 的 .wiki__md table。
+ */
+.msg__content table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  width: max-content;
+  max-width: 100%;
+  margin: 0.6rem 0;
+  font-size: 0.88rem;
+}
+
+.msg__content th,
+.msg__content td {
+  border: 1px solid #e2e8f0;
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.msg__content th {
+  background: #f1f5f9;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.msg__content tbody tr:nth-child(even) td {
+  background: #f8fafc;
+}
+
+/*
+ * 助手贴的原图（本地直出 /api/image/cache/<id>）。
+ * 同款写法见 DocumentsPage.css 的 .wiki__md img，两处保持一致：
+ * 图片最大只撑满气泡宽度，不把 860px 的聊天栏顶宽。
+ */
+.msg__content img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.5rem 0;
+  border: 1px solid #eef2f6;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+/* 图没取到时的兜底：宁可说一句「加载不了」，也不留一个裂图图标 */
+.msg__img-fallback {
+  display: block;
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  color: #64748b;
+  font-size: 0.85rem;
 }
 
 .muted {

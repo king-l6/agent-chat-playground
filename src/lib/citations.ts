@@ -5,8 +5,14 @@ export type CitationHit = {
   citation: number
   id: string
   docId?: string
+  /** 来源文档可读名（含期次），后端 retrieve 时补上 */
+  docName?: string
+  /** 来源文档完整路径；内置文档没有 */
+  docPath?: string
   title: string
   snippet: string
+  /** 图片命中才有：本地直出的相对地址（角标浮层里拿它显示缩略图） */
+  imageUrl?: string
 }
 
 /**

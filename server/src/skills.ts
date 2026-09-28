@@ -11,10 +11,9 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { SKILLS_DIR } from './paths.js'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-export const SKILLS_DIR = path.resolve(__dirname, '../skills')
+export { SKILLS_DIR }
 
 export type SkillMeta = {
   name: string

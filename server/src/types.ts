@@ -42,3 +42,7 @@ export type SseEvent =
   | { type: 'done' }
   /** 整轮异常 */
   | { type: 'error'; message: string }
+  | { type: 'role_start'; role: 'pm' | 'dev' | 'review' | 'qa' }
+  | { type: 'role_done'; role: 'pm' | 'dev' | 'review' | 'qa' }
+  | { type: 'artifact'; name: string; payload: unknown }
+  | { type: 'gate_blocked'; gate: string; message: string }

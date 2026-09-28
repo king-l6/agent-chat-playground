@@ -8,8 +8,12 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
 } from 'openai/resources/chat/completions';
+import { resolveLlmFromSettings } from './settings.js';
 import { skillsCatalogText } from './skills.js';
-import { executeTool, toolDefinitions } from './tools.js';
+import { mcpInstructions, mcpToolDefinitions } from './mcp.js';
+import { executeTool, getToolDefinitions } from './tools.js';
+import { workspaceDigest } from './workspace.js';
+import { memoryBlockFor } from './memory/recall.js';
 import type { ChatMessageInput, SseEvent } from './types.js';
 
 /**
@@ -24,20 +28,66 @@ import type { ChatMessageInput, SseEvent } from './types.js';
  * 规则 8 是 Skill：system 里只放目录，正文靠 load_skill。
  * Prompt 是软约束（模型可能不听）；下面 runLive 的 maxRounds 是硬上限。
  */
-function buildSystemPrompt() {
+export function buildSystemPrompt(memoryBlock = '') {
+  const mcp = mcpPromptBlock()
+  const workspaceBlock = workspacePromptBlock()
+  // MCP 块占掉 11，记忆就顺延成 12；没有 MCP 时记忆是 11，避免出现「规则 11 不见了」
+  const memoryRule = memoryBlock
+    ? `\n${mcp ? '12' : '11'}. 关于用户的长期记忆（来自过去的会话，可能已经过时）：\n${memoryBlock}\n`
+    : ''
   return `你是「Agent Chat Playground」里的助手，面向求职演示。
 规则：
 1. 需要准确时间时调用 get_current_time。
 2. 需要计算时调用 calculator。
-3. 用户问本项目、SSE、tool calling、技术栈、怎么学、学习规划、或上传文档里的内容时，先调用 search_notes，再只根据返回的 hits 回答。search_notes 的 query 可以是用户原句或 2～6 个关键词。
+3. 用户问本项目、SSE、tool calling、技术栈、怎么学、学习规划、或上传文档里的内容时，先调用 search_notes，再只根据返回的 hits 回答。search_notes 的 query 可以是用户原句或 2～6 个关键词。用户要原图、截图、配图，或问「你能不能把某张图发我」时，也必须先调用 search_notes：命中的图片条目（title 以「图片 · 」开头）带 hits[].imageUrl，用 markdown 图片语法贴出来就是原图。不许凭上一轮自己说过的话断言自己的能力边界——「我拿不到图片」「这个工具不返回图片」这类结论，只有本轮 hits 里确实没有图片条目时才能下；没查过就说「我先去检索一下」，不要直接下结论。用户只说了「图给我」这种没头没尾的话时，结合上文能确定是哪篇就搜那篇，确定不了再问。已连接工作区时（下方有「已连接的工作区」那段），用户说的「这个项目 / 这个仓库 / 这个代码库 / 当前工作区」指的就是它——先按那段回答；那段不够再用 workspace_list / workspace_read 补两三次，之后必须给出结论。不要因为知识库没命中就说「不敢认定是哪个」或只罗列知识库内容，也不要把仓库逐个文件读一遍（工具轮次有限，读太多会连答案都说不出来）。
 4. 使用 search_notes 后：在相关句子末尾标注引用，格式必须是方括号+数字，例如 [1] 或 [2]。数字必须来自「同一次」工具返回的 hits[].citation（本轮局部编号，1 表示本轮第一条命中）；不要用旧一次检索的编号；不要编造 hits 里没有的内容；未命中就明确说知识库没有。
+每条 hit 的 hits[].docName 是来源文档名（带期次，如「平台工作周报-2026年8月W1」）。回答要先说清内容出自哪一篇/哪一期，周报、月报、季度小结这类分期文档尤其不能只写「最近的周报」而不说期次。用户问「最近/最新」时按 hits[].docName 里的期次判断新旧，不要凭印象编；如果返回的几期都不是最新的，就照实说是哪几期，不要谎称是最新的。
 5. 用简洁中文回答；调用其它工具后也要根据工具结果给出最终结论。
 6. 用户要掷骰子、随机点数时调用 roll_dice。
 7. search_notes 对同一条用户问题最多调用 1 次。工具一旦返回了 hits（哪怕只有 1 条），必须立刻给出最终中文回答并标注 [1][2]，禁止再调用任何工具。只有 hits 为空时，才允许换一个更短的关键词再搜一次。
 8. Skill 是说明书，不是函数。已安装 Skill：
 ${skillsCatalogText()}
 用户任务匹配某条 description 时，先 load_skill(name)，再按返回的 body 执行。同一 skill 每轮最多一次。若 history 里已经有该 skill 的 load_skill 结果，直接按 body 执行，不要再 load。问时间、算术、掷骰子不要 load_skill。
-`;
+9. 用户要读/写/列出已选工作区里的文件时，调用 workspace_read / workspace_write / workspace_list。path 只用相对路径（如 README.md）。问**知识库**里的内容（这个 Playground 自身的技术栈、SSE、简历缺口、上传文档）仍走 search_notes；但用户指的是**已连接的代码库**（「这个项目 / 这个仓库 / 这个代码库 / 当前工作区」）时走工作区那条路，别拿知识库顶替，也别拿工作区顶替知识库。
+10. 用户问当前改了什么、未提交、diff 时，先 git_status，需要看具体行再 git_diff。不要 checkout / reset。
+${workspaceBlock}${mcp}${memoryRule}`;
+}
+
+/**
+ * 「已连接的工作区」那段事实：路径 + 根目录清单 + README 开头。
+ *
+ * 为什么不占编号：11/12 已经被 MCP 块和记忆块按有无动态占掉了（见上面 memoryRule
+ * 的三元表达式），这里再硬编一个编号必定撞号。它本来也是规则 9 的补充材料，
+ * 没有编号照样读得懂。
+ *
+ * 模型凭什么必须看到这段：实测连了工作区再问「这个项目是干什么的」，模型反问
+ * 「不敢替你认定是哪个」——因为工作区从来没进过 system prompt，它只知道知识库。
+ */
+function workspacePromptBlock() {
+  const digest = workspaceDigest()
+  if (!digest) return ''
+  const lines = [
+    `已连接的工作区（用户当前打开的本地代码库「${digest.name}」）：`,
+    `路径：${digest.root}`,
+  ]
+  if (digest.entries.length) {
+    const more = digest.more ? `（另有 ${digest.more} 项）` : ''
+    lines.push(`根目录：${digest.entries.join(' ')}${more}`)
+  }
+  lines.push(
+    digest.readme
+      ? `README（${digest.readme.file}）开头：\n${digest.readme.excerpt}`
+      : 'README：这个目录没有 README。上面的根目录清单通常就够判断技术栈了；不够时最多再用 workspace_list / workspace_read 看两三个关键文件（package.json、配置文件、入口文件），就要给出结论——不要逐个文件读，工具轮次有限，读太多反而答不出来。',
+  )
+  return `\n${lines.join('\n')}\n`
+}
+
+function mcpPromptBlock() {
+  const tools = mcpToolDefinitions()
+  if (tools.length === 0) return ''
+  const names = tools.map((t) => t.function.name).join('、')
+  const extra = mcpInstructions().slice(0, 600)
+  return `11. 已连接 MCP 工具：${names}。用户问这些工具能查的业务数据时调用它们，不要用 search_notes 代替。${extra ? `服务端说明：${extra}` : ''}`
 }
 
 /** 向 SSE 管道推事件的函数类型（由 index.ts 注入） */
@@ -101,6 +151,12 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
   const wantsCalc = /算|计算|\d+\s*[\+\-\*\/]/.test(lower);
   const wantsInterviewSkill = matchesInterviewSkill(last);
   const wantsSearch = /项目|sse|tool|agent|技术栈|简历|rag|知识库/.test(lower);
+  const wantsWorkspace =
+    /readme|\.md|工作区|读一下.*文件|打开.*文件|workspace_read/i.test(last) &&
+    /读|看|打开|列出|list|readme/i.test(last);
+  const wantsGit = /改了什么|当前改动|未提交|git status|git diff|有哪些改|看一下 diff/i.test(
+    last,
+  );
 
   /** 把整段回答拆成小块推 text_delta，模拟打字机 */
   const streamText = async (text: string) => {
@@ -150,6 +206,58 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
     return;
   }
 
+  if (wantsGit) {
+    const statusId = 'mock_git_status'
+    send({ type: 'tool_start', id: statusId, name: 'git_status', arguments: '{}' })
+    await sleep(160)
+    try {
+      const statusRaw = await executeTool('git_status', '{}')
+      send({ type: 'tool_result', id: statusId, name: 'git_status', result: statusRaw })
+      const diffId = 'mock_git_diff'
+      send({ type: 'tool_start', id: diffId, name: 'git_diff', arguments: '{}' })
+      await sleep(160)
+      const diffRaw = await executeTool('git_diff', '{}')
+      send({ type: 'tool_result', id: diffId, name: 'git_diff', result: diffRaw })
+      const status = JSON.parse(statusRaw) as { status: string }
+      const diff = JSON.parse(diffRaw) as { diff: string }
+      const lines = status.status.split('\n').filter(Boolean).slice(0, 12)
+      await streamText(
+        `（mock）git_status：\n${lines.join('\n')}\n\n（diff 已截取前几行）\n${diff.diff.slice(0, 400)}`,
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      send({ type: 'tool_error', id: statusId, name: 'git_status', error: message })
+      await streamText(`（mock）读取 git 失败：${message}`)
+    }
+    send({ type: 'done' })
+    return
+  }
+
+  // —— 工作区读文件（先于知识库，避免「读 README」被搜笔记抢走）——
+  if (wantsWorkspace) {
+    const rel =
+      last.match(/([\w./-]+\.(?:md|txt|ts|tsx|json))/)?.[1] ?? 'README.md'
+    const id = 'mock_ws_1'
+    const args = JSON.stringify({ path: rel })
+    send({ type: 'tool_start', id, name: 'workspace_read', arguments: args })
+    await sleep(200)
+    try {
+      const result = await executeTool('workspace_read', args)
+      send({ type: 'tool_result', id, name: 'workspace_read', result })
+      const parsed = JSON.parse(result) as { path: string; content: string }
+      const preview = parsed.content.slice(0, 400)
+      await streamText(
+        `（mock）已读工作区 ${parsed.path}：\n${preview}${parsed.content.length > 400 ? '…' : ''}`,
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      send({ type: 'tool_error', id, name: 'workspace_read', error: message })
+      await streamText(`（mock）读取失败：${message}`)
+    }
+    send({ type: 'done' })
+    return
+  }
+
   // —— Skill：先加载说明书，再按正文去检索 ——
   if (wantsInterviewSkill) {
     const skillId = 'mock_skill_1';
@@ -163,7 +271,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
     const searchArgs = JSON.stringify({ query: last });
     send({ type: 'tool_start', id: searchId, name: 'search_notes', arguments: searchArgs });
     await sleep(200);
-    const result = await executeTool('search_notes', searchArgs);
+    const result = await executeTool('search_notes', searchArgs, { userQuery: last });
     send({ type: 'tool_result', id: searchId, name: 'search_notes', result });
     const parsed = JSON.parse(result) as {
       hits?: Array<{ citation?: number; title: string; snippet: string }>;
@@ -186,7 +294,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
     const args = JSON.stringify({ query: last });
     send({ type: 'tool_start', id, name: 'search_notes', arguments: args });
     await sleep(200);
-    const result = await executeTool('search_notes', args);
+    const result = await executeTool('search_notes', args, { userQuery: last });
     send({ type: 'tool_result', id, name: 'search_notes', result });
     const parsed = JSON.parse(result) as {
       hits?: Array<{ id: string; title: string; snippet: string }>;
@@ -205,37 +313,14 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
 
   // 都不匹配：提示怎么用
   await streamText(
-    '（mock 模式）当前未配置 API Key。你可以问：现在几点？帮我算 123*456；这个项目的技术栈是什么？\n配置 `.env` 里的 ANTHROPIC_API_KEY（或 OPENAI_API_KEY）后即可走真实模型。',
+    '（mock 模式）当前未配置 API Key。你可以问：现在几点？帮我算 123*456；这个项目的技术栈是什么？\n到「配置」页填 API Key 后即可走真实模型。',
   );
   send({ type: 'done' });
 }
 
-/**
- * 从环境变量解析 Key / BaseURL / Model
- * 支持 OPENAI_*，也兼容公司网关 ANTHROPIC_*（Base 会自动补 /v1）
- */
+/** 面板配置优先；mock 会压过 .env 里的 Key */
 export function resolveLlmConfig() {
-  const apiKey =
-    process.env.OPENAI_API_KEY?.trim() ||
-    process.env.ANTHROPIC_API_KEY?.trim() ||
-    '';
-
-  const openaiBase = process.env.OPENAI_BASE_URL?.trim();
-  const anthropicBase = process.env.ANTHROPIC_BASE_URL?.trim()?.replace(
-    /\/$/,
-    '',
-  );
-  const baseURL =
-    openaiBase || (anthropicBase ? `${anthropicBase}/v1` : undefined);
-
-  const model =
-    process.env.OPENAI_MODEL?.trim() ||
-    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL?.trim() ||
-    process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL?.trim() ||
-    process.env.ANTHROPIC_DEFAULT_OPUS_MODEL?.trim() ||
-    'deepseek-v4-flash';
-
-  return { apiKey, baseURL, model };
+  return resolveLlmFromSettings();
 }
 
 /**
@@ -273,22 +358,28 @@ async function runLive(
 ) {
   send({ type: 'meta', mode: 'live', model });
 
+  const lastUser = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+
+  // 长期记忆召回必须在拼 system 之前：命中几条就作为规则 12 注入。
+  // memoryBlockFor 内部 fail-open，出错返回空串，不影响这一轮聊天。
+  const memoryBlock = await memoryBlockFor(lastUser);
+
   // 对话上下文：system + 前端传来的 user/assistant
   const history: ChatCompletionMessageParam[] = [
-    { role: 'system', content: buildSystemPrompt() },
+    { role: 'system', content: buildSystemPrompt(memoryBlock) },
     ...messages.map((m) => ({ role: m.role, content: m.content }) as const),
   ];
 
-  const lastUser = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
   await preloadMatchedSkills(lastUser, history, send);
 
-  const maxRounds = 4;
+  const tools = getToolDefinitions()
+  const maxRounds = mcpToolDefinitions().length > 0 ? 6 : 4
   for (let round = 0; round < maxRounds; round += 1) {
     // 开启一轮流式补全，并声明可用工具
     const stream = await client.chat.completions.create({
       model,
       messages: history,
-      tools: toolDefinitions,
+      tools,
       stream: true,
     });
 
@@ -337,11 +428,13 @@ async function runLive(
     });
     // 逐个执行工具，结果以 role:tool 写回，并推 SSE 给前端卡片
     for (const call of toolCalls) {
+      if (call.type !== 'function') continue
       const name = call.function.name;
       const args = call.function.arguments;
       send({ type: 'tool_start', id: call.id, name, arguments: args });
       try {
-        const result = await executeTool(name, args);
+        // 把用户原话一起给下去：search_notes 判时间意图要用它，模型组的 query 会丢词
+        const result = await executeTool(name, args, { userQuery: lastUser });
         send({ type: 'tool_result', id: call.id, name, result });
         history.push({
           role: 'tool',
@@ -388,5 +481,24 @@ export async function runAgentChat(options: {
   }
 
   const client = new OpenAI({ apiKey, baseURL });
-  await runLive(client, model, options.messages, options.send);
+  try {
+    await runLive(client, model, options.messages, options.send);
+  } catch (err) {
+    throw wrapLlmError(err, baseURL);
+  }
+}
+
+/** SDK 的 "Connection error." 看不出是网关挂了还是工作区坏了 */
+function wrapLlmError(err: unknown, baseURL?: string) {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (
+    raw === 'Connection error.' ||
+    /fetch failed|ENOTFOUND|ECONNREFUSED|getaddrinfo/i.test(raw)
+  ) {
+    const where = baseURL ? `（${baseURL}）` : '';
+    return new Error(
+      `模型网关连不上${where}。本地后端是好的，不是工作区坏了。多半没连公司网/VPN。到「配置」页切到 MOCK 就能继续演示工具卡片。`,
+    );
+  }
+  return err instanceof Error ? err : new Error(raw);
 }

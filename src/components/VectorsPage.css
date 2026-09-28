@@ -109,7 +109,7 @@
 .vd-body {
   min-height: 0;
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 260px 1fr;
 }
 
 .vd-ns {
@@ -128,17 +128,75 @@
   font-weight: 700;
 }
 
+.vd-ns__loading {
+  padding: 0.35rem 0.75rem 0.35rem 1.6rem;
+  font-size: 0.72rem;
+  color: #64748b;
+}
+
+.vd-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.vd-tree .vd-tree {
+  padding-left: 0.7rem;
+}
+
+.vd-ns__dir {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: #94a3b8;
+  padding: 0.32rem 0.45rem;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+.vd-ns__dir:hover {
+  background: #111827;
+  color: #e2e8f0;
+}
+
+.vd-ns__dir-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vd-ns__chev {
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 4px 0 4px 6px;
+  border-color: transparent transparent transparent #64748b;
+  flex-shrink: 0;
+}
+
+.vd-ns__chev--open {
+  transform: rotate(90deg);
+}
+
 .vd-ns__item {
   width: 100%;
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
   gap: 0.5rem;
   text-align: left;
   border: 0;
   background: transparent;
   color: #94a3b8;
-  padding: 0.45rem 0.55rem;
+  padding: 0.35rem 0.45rem;
   border-radius: 8px;
   cursor: pointer;
   font: inherit;
@@ -154,32 +212,24 @@
   color: #ccfbf1;
 }
 
-.vd-ns__id {
-  display: block;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.72rem;
-}
-
 .vd-ns__file {
   display: block;
-  font-size: 0.7rem;
-  color: #64748b;
-  margin-top: 0.12rem;
+  font-size: 0.78rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 150px;
-}
-
-.vd-ns__item--on .vd-ns__file {
-  color: #99f6e4;
+  min-width: 0;
 }
 
 .vd-ns__count {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.7rem;
   color: #64748b;
-  padding-top: 0.1rem;
+  flex-shrink: 0;
+}
+
+.vd-ns__item--on .vd-ns__count {
+  color: #99f6e4;
 }
 
 .vd-main {
@@ -335,17 +385,38 @@
 }
 
 .vd-strip {
-  display: flex;
+  display: block;
   height: 18px;
   width: min(100%, 220px);
   border-radius: 3px;
   overflow: hidden;
   background: #0f172a;
+  flex-shrink: 0;
 }
 
-.vd-strip span {
-  flex: 1;
-  min-width: 2px;
+.vd-pager {
+  display: flex;
+  gap: 6px;
+}
+
+.vd-pager button {
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #fff;
+  color: #334155;
+  cursor: pointer;
+}
+
+.vd-pager button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.vd-pager button:not(:disabled):hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
 }
 
 .vd-num {

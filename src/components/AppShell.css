@@ -1,11 +1,9 @@
 .app {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   display: grid;
-  grid-template-rows: auto 1fr auto;
-  background:
-    radial-gradient(1200px 500px at 10% -10%, #dbeafe 0%, transparent 55%),
-    radial-gradient(900px 400px at 100% 0%, #e0e7ff 0%, transparent 50%),
-    #f8fafc;
+  grid-template-columns: 232px minmax(0, 1fr);
+  background: #f4f5f7;
   color: #0f172a;
   font-family:
     'Segoe UI',
@@ -15,18 +13,385 @@
     sans-serif;
 }
 
+.app--rail {
+  grid-template-columns: 68px minmax(0, 1fr);
+}
+
+.rail {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-right: 1px solid #e8eaee;
+  padding: 0.85rem 0.7rem 0.75rem;
+}
+
+.rail__brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0 0.2rem 0.85rem;
+}
+
+.rail__logo {
+  font-weight: 750;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+}
+
+.rail__fold {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  color: #64748b;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.rail__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.rail__item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  text-decoration: none;
+  color: #475569;
+  font-size: 0.88rem;
+  font-weight: 550;
+  padding: 0.52rem 0.65rem;
+  border-radius: 10px;
+  min-height: 38px;
+}
+
+.rail__item:hover {
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+.rail__item--on {
+  background: #f1f5f9;
+  color: #0f172a;
+  font-weight: 650;
+}
+
+.rail__item svg {
+  flex-shrink: 0;
+}
+
+.rail__help {
+  margin-top: auto;
+  padding-top: 0.75rem;
+}
+
+.rail__help-label {
+  margin: 0 0.65rem 0.35rem;
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+
+.rail__badge {
+  margin-top: 0.55rem;
+  text-decoration: none;
+  font-size: 0.72rem;
+  font-weight: 650;
+  padding: 0.4rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail__badge--live {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.rail__badge--mock {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.rail--min .rail__logo,
+.rail--min .rail__item span,
+.rail--min .rail__help-label,
+.rail--min .rail__badge {
+  display: none;
+}
+
+.rail--min .rail__brand {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.rail--min .rail__item {
+  justify-content: center;
+  padding-left: 0.4rem;
+  padding-right: 0.4rem;
+}
+
+.app__body {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  /* 原来第一行 auto 是留给顶部的 .wsbar；工作区条挪到输入框下方后这层只剩一个子元素，
+     留着两行会让它落进 auto 行、撑不满高度 */
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.app__body > .docs,
+.app__body > .vd,
+.app__body > .wf,
+.app__body > .desk,
+.app__body > .reel,
+.app__body > .kb,
+.app__body > .settings {
+  min-height: 0;
+}
+
+.app__body > .kb,
+.app__body > .settings {
+  overflow: auto;
+}
+
+.chrome {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
 .topbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
-  padding: 1rem 1.25rem;
-  border-bottom: 1px solid #e2e8f0;
+  padding: 1rem 1.25rem 0.75rem;
   background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(8px);
-  position: sticky;
-  top: 0;
-  z-index: 10;
+}
+
+.topbar__right {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+a.badge {
+  text-decoration: none;
+}
+
+.wsbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.4rem 1rem;
+  border-bottom: 1px solid #e8eaee;
+  background: #fff;
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+.wsbar--on {
+  background: #ecfdf5;
+  border-bottom-color: #bbf7d0;
+  color: #065f46;
+}
+
+.wsbar__text {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.65rem;
+}
+
+.wsbar__label {
+  font-weight: 750;
+  color: inherit;
+}
+
+.wsbar__path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+.wsbar__full {
+  display: block;
+  margin-top: 0.1rem;
+  font-size: 0.72rem;
+  color: #047857;
+  word-break: break-all;
+}
+
+.wsbar__empty {
+  color: #64748b;
+}
+
+.wsbar__err {
+  color: #b91c1c;
+}
+
+.wsbar__btn {
+  flex-shrink: 0;
+  border: 1px solid #86efac;
+  background: #fff;
+  color: #047857;
+  font-weight: 650;
+  font-size: 0.78rem;
+  border-radius: 999px;
+  padding: 0.28rem 0.75rem;
+  cursor: pointer;
+}
+
+.wsbar__hint {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+
+.wsbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.wsbar__form {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.wspick {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(28, 25, 20, 0.45);
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.wspick__panel {
+  width: min(36rem, 100%);
+  max-height: min(32rem, 86vh);
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  background: #f3ead8;
+  color: #241f1a;
+  border: 1px solid #c9bfae;
+  padding: 0.85rem 0.95rem 0.95rem;
+}
+
+.wspick__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.wspick__head strong {
+  font-family: Palatino, 'Songti SC', 'STSong', serif;
+  font-size: 1.05rem;
+}
+
+.wspick__x,
+.wspick__jumps button,
+.wspick__ok {
+  border: 1px solid #241f1a;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 650;
+  padding: 0.28rem 0.65rem;
+  cursor: pointer;
+}
+
+.wspick__cwd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  color: #5c554a;
+  word-break: break-all;
+}
+
+.wspick__jumps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.wspick__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  border: 1px solid #c9bfae;
+  background: #f7f1e4;
+}
+
+.wspick__list button {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid #e4ddd0;
+  background: transparent;
+  padding: 0.45rem 0.65rem;
+  font: inherit;
+  font-size: 0.84rem;
+  cursor: pointer;
+}
+
+.wspick__list button:hover,
+.wspick__list button:focus-visible {
+  background: #efe1b8;
+}
+
+.wspick__ok {
+  background: #1f4d3a;
+  color: #f4efe4;
+}
+
+.wsbar__form input {
+  min-width: 14rem;
+  max-width: 28rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  padding: 0.28rem 0.7rem;
+  font: inherit;
+  font-size: 0.78rem;
+  background: #fff;
+}
+
+.wsbar__form button {
+  flex-shrink: 0;
+  border: 1px solid #86efac;
+  background: #fff;
+  color: #047857;
+  font-weight: 650;
+  font-size: 0.78rem;
+  border-radius: 999px;
+  padding: 0.28rem 0.75rem;
+  cursor: pointer;
 }
 
 .brand {
@@ -63,6 +428,158 @@
   color: #b45309;
 }
 
+.app__talk {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  background: transparent;
+}
+
+.app__chat {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  background: #fff;
+}
+
+.sessions {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #e8eaee;
+  background: #fafbfc;
+  padding: 0.75rem 0.65rem;
+}
+
+.sessions__new {
+  flex-shrink: 0;
+  border: 1px dashed #cbd5e1;
+  background: #fff;
+  color: #0f172a;
+  border-radius: 10px;
+  padding: 0.55rem 0.75rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.sessions__new:hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
+}
+
+.sessions__list {
+  list-style: none;
+  margin: 0.65rem 0 0;
+  padding: 0;
+  overflow: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.sessions__list li {
+  position: relative;
+}
+
+.sessions__item {
+  width: 100%;
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  border-radius: 10px;
+  padding: 0.5rem 1.6rem 0.5rem 0.45rem;
+  cursor: pointer;
+  color: inherit;
+}
+
+.sessions__item:hover,
+.sessions__item--on {
+  background: #fff;
+}
+
+.sessions__item--on {
+  box-shadow: inset 0 0 0 1px #e2e8f0;
+}
+
+.sessions__avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #334155;
+  display: grid;
+  place-items: center;
+  font-size: 0.78rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.sessions__meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.sessions__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.4rem;
+  align-items: baseline;
+}
+
+.sessions__row strong {
+  font-size: 0.84rem;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessions__row time {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  color: #94a3b8;
+}
+
+.sessions__preview {
+  font-size: 0.75rem;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessions__del {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.2rem;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.sessions__list li:hover .sessions__del,
+.sessions__del:focus-visible {
+  opacity: 1;
+}
+
+.sessions__del:hover {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
 .app--kb {
   grid-template-rows: auto 1fr;
   height: 100vh;
@@ -82,6 +599,88 @@
 .app--kb > .wf {
   min-height: 0;
   overflow: hidden;
+}
+
+.app--kb > .desk {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app--desk {
+  background: #1c1914;
+}
+
+.app--desk .topbar {
+  background: #241f1a;
+  color: #efe8d8;
+  padding: 0.45rem 0.8rem 0.35rem;
+}
+
+.app--desk .sub {
+  display: none;
+}
+
+.app--desk .brand {
+  color: #efe8d8;
+}
+
+.app--desk .nav {
+  background: #2f2922;
+}
+
+.app--desk .nav__link {
+  color: #b7ad9c;
+}
+
+.app--desk .nav__link--on {
+  background: #efe8d8;
+  color: #241f1a;
+  box-shadow: none;
+}
+
+.app--desk .wsbar {
+  /* 底色和边框由 .composer-wrap .wsbar 统一处理（它在底部是一条，不该整块铺底），
+     这里只定深色主题下的文字色 */
+  color: #cfc4b0;
+}
+
+.app--desk .wsbar__full {
+  display: none;
+}
+
+.app--desk .wsbar--on {
+  color: #d7e7d6;
+}
+
+.app--desk .wsbar__empty,
+.app--desk .wsbar__hint,
+.app--desk .wsbar__full {
+  color: #9a8f7d;
+}
+
+.app--desk .wsbar__btn,
+.app--desk .wsbar__form button,
+.app--desk .wsbar__actions .wsbar__btn {
+  border-color: #6b8f74;
+  background: #efe8d8;
+  color: #1f4d3a;
+}
+
+.app--desk .wsbar__form input {
+  border: 1px solid #6b5f4e;
+  background: #1c1914;
+  color: #efe8d8;
+  border-radius: 0;
+  padding: 0.28rem 0.5rem;
+  font: inherit;
+  font-size: 0.78rem;
+  min-width: 16rem;
+}
+
+.app--desk .badge {
+  background: #1c1914;
+  border-color: #6b5f4e;
+  color: #efe8d8;
 }
 
 .nav {
@@ -144,6 +743,23 @@
   padding: 0.75rem 1rem 1rem;
 }
 
+/*
+ * 工作区条现在挂在输入框下方（原来是横跨全宽的顶栏）。
+ * 全宽 + 下边框 + 绿底那套顶栏样式搬到这里会显得错位，所以在定位到 composer-wrap 里时收回来：
+ * 跟 composer 同宽居中、不要下边框（它下面是页面边缘了），已连接的状态只用绿色文字表达。
+ */
+.composer-wrap .wsbar {
+  max-width: 860px;
+  margin: 0.55rem auto 0;
+  padding: 0;
+  background: transparent;
+  border-bottom: none;
+}
+
+.composer-wrap .wsbar--on {
+  background: transparent;
+}
+
 .hints {
   display: flex;
   flex-wrap: wrap;
@@ -178,9 +794,12 @@
 
 .composer textarea {
   width: 100%;
-  resize: vertical;
+  /* 高度由 App.tsx 按内容算（COMPOSER_MAX_HEIGHT 必须和这里的 max-height 一致），
+     所以禁掉手动拖拽——否则拖大之后一打字就被拉回去，反而是个 bug */
+  resize: none;
   min-height: 64px;
   max-height: 180px;
+  overflow-y: auto;
   border: 1px solid #cbd5e1;
   border-radius: 12px;
   padding: 0.75rem 0.85rem;
@@ -224,6 +843,34 @@
   color: #b91c1c;
   border: 1px solid #fecaca;
   font-size: 0.88rem;
+}
+
+@media (max-width: 900px) {
+  .app,
+  .app--rail {
+    grid-template-columns: 68px minmax(0, 1fr);
+  }
+
+  .rail__logo,
+  .rail__item span,
+  .rail__help-label,
+  .rail__badge {
+    display: none;
+  }
+
+  .rail__brand {
+    justify-content: center;
+  }
+
+  .rail__item {
+    justify-content: center;
+  }
+}
+
+@media (max-width: 900px) {
+  .app__chat {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 640px) {

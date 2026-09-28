@@ -111,11 +111,14 @@ export type RagStatus = {
   indexed: number
   dim?: number
   embedError: string | null
+  images?: number
+  imageModel?: string
+  imageDim?: number
 }
 
 export type KnowledgeDoc = {
   docId: string
-  source: 'builtin' | 'upload'
+  source: 'builtin' | 'upload' | 'wiki'
   filename?: string
   title: string
   chunkCount: number
@@ -138,6 +141,129 @@ export type SkillMeta = {
   description: string
 }
 
+/** 当前 Agent 能碰的磁盘根目录；没选过是 null */
+export async function fetchWorkspace() {
+  const { data } = await axios.get<{ root: string | null; here?: string }>(`${API_BASE}/api/workspace`);
+  return data.root;
+}
+
+export async function fetchWorkspaceInfo() {
+  const { data } = await axios.get<{ root: string | null; here: string }>(`${API_BASE}/api/workspace`)
+  return data
+}
+
+export type WorkspaceBrowse = {
+  cwd: string
+  parent: string | null
+  home: string
+  here: string
+  entries: Array<{ name: string; path: string }>
+}
+
+export async function browseWorkspace(dir?: string) {
+  try {
+    const { data } = await axios.get<WorkspaceBrowse>(`${API_BASE}/api/workspace/browse`, {
+      params: dir ? { dir } : undefined,
+    })
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+export async function setWorkspace(root: string) {
+  try {
+    const { data } = await axios.post<{ ok: boolean; root: string }>(`${API_BASE}/api/workspace`, {
+      root,
+    })
+    return data.root
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+export function notifyWorkspaceChanged(root: string | null) {
+  window.dispatchEvent(new CustomEvent('workspace-changed', { detail: root }))
+}
+
+export type LlmSettingsPublic = {
+  mode: 'mock' | 'live'
+  hasKey: boolean
+  baseURL: string
+  model: string
+}
+
+export type McpPublic = {
+  enabled: boolean
+  connected: boolean
+  url: string
+  hasAuth: boolean
+  tools: string[]
+  error: string | null
+}
+
+export async function fetchSettings() {
+  const { data } = await axios.get<LlmSettingsPublic>(`${API_BASE}/api/settings`)
+  return data
+}
+
+export async function saveSettings(body: {
+  mode: 'mock' | 'live'
+  apiKey?: string
+  baseURL?: string
+  model?: string
+}) {
+  try {
+    const { data } = await axios.put<LlmSettingsPublic>(`${API_BASE}/api/settings`, body)
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+export async function fetchMcp() {
+  const { data } = await axios.get<McpPublic>(`${API_BASE}/api/mcp`)
+  return data
+}
+
+export async function saveMcp(body: { enabled: boolean; url?: string; auth?: string }) {
+  try {
+    const { data } = await axios.put<McpPublic>(`${API_BASE}/api/mcp`, body)
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+export async function importClaudeMcp() {
+  try {
+    const { data } = await axios.post<McpPublic>(`${API_BASE}/api/mcp/import-claude`)
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
 export async function fetchHealth() {
   const { data } = await axios.get<{
     ok: boolean
@@ -145,17 +271,165 @@ export async function fetchHealth() {
     model?: string
     rag?: RagStatus
     skills?: SkillMeta[]
+    mcp?: McpPublic
   }>(`${API_BASE}/api/health`);
   return data;
 }
 
-export async function fetchKnowledgeBoard() {
+export type WikiNode = {
+  name: string
+  path: string
+  type: 'dir' | 'file'
+  children?: WikiNode[]
+}
+
+export async function fetchWikiTree() {
+  try {
+    const { data } = await axios.get<{
+      root: string
+      exists: boolean
+      count: number
+      tree: WikiNode[]
+    }>(`${API_BASE}/api/wiki/tree`)
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+export async function fetchWikiDoc(docPath: string) {
+  try {
+    const { data } = await axios.get<{
+      path: string
+      title: string
+      content: string
+      bytes: number
+    }>(`${API_BASE}/api/wiki/doc`, { params: { path: docPath } })
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+export type WikiIngestStatus = {
+  running: boolean
+  done: number
+  total: number
+  current: string
+  ok: number
+  failed: number
+  error: string | null
+  finishedAt: string | null
+}
+
+export async function ingestWikiOne(docPath: string) {
+  try {
+    const { data } = await axios.post<{
+      ok: boolean
+      mode: 'one'
+      docId: string
+      chunks: number
+      rag: RagStatus
+    }>(`${API_BASE}/api/wiki/ingest`, { path: docPath })
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+export async function ingestWikiBatch(options: { prefix?: string; limit?: number } = {}) {
+  try {
+    const { data } = await axios.post<{
+      ok: boolean
+      mode: 'batch'
+      status: WikiIngestStatus
+    }>(`${API_BASE}/api/wiki/ingest`, { all: true, ...options })
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+export async function fetchWikiIngestStatus() {
+  const { data } = await axios.get<WikiIngestStatus>(`${API_BASE}/api/wiki/ingest/status`)
+  return data
+}
+
+export async function fetchKnowledgeBoard(options?: { lite?: boolean }) {
   const { data } = await axios.get<{
     rag: RagStatus
     documents: KnowledgeDoc[]
     index: { model: string; dim: number; chunks: IndexRow[] }
-  }>(`${API_BASE}/api/knowledge`);
+  }>(`${API_BASE}/api/knowledge`, {
+    params: options?.lite ? { lite: 1 } : undefined,
+  });
   return data;
+}
+
+/** 向量库 points 分页；doc 为空表示全库 */
+export async function fetchKnowledgeChunks(params: {
+  doc?: string | null
+  q?: string
+  offset?: number
+  limit?: number
+}) {
+  const { data } = await axios.get<{
+    total: number
+    offset: number
+    limit: number
+    chunks: IndexRow[]
+  }>(`${API_BASE}/api/knowledge/chunks`, {
+    params: {
+      doc: params.doc || undefined,
+      q: params.q || undefined,
+      offset: params.offset ?? 0,
+      limit: params.limit ?? 50,
+    },
+  })
+  return data
+}
+
+export type NamespaceChild = {
+  kind: 'dir' | 'file'
+  name: string
+  path: string
+  count: number
+  id?: string
+  source?: string
+}
+
+/** 向量库侧栏：按 path 拉一层子节点 */
+export async function fetchKnowledgeNamespaces(path = '') {
+  const { data } = await axios.get<{ path: string; children: NamespaceChild[] }>(
+    `${API_BASE}/api/knowledge/namespaces`,
+    { params: path ? { path } : {} },
+  )
+  return data
+}
+
+/** 深链选中文档时解析目录路径 */
+export async function fetchKnowledgeNamespacePath(docId: string) {
+  const { data } = await axios.get<{ resolve: string[] | null }>(
+    `${API_BASE}/api/knowledge/namespaces`,
+    { params: { doc: docId } },
+  )
+  return data.resolve
 }
 
 /** 上传知识库文档（multipart 字段名 file） */

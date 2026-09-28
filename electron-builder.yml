@@ -1,0 +1,25 @@
+appId: com.kingl6.agent-chat-playground
+productName: Agent Chat Playground
+directories:
+  output: release
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - dist-server/**/*
+  - package.json
+extraResources:
+  - from: server/skills
+    to: skills
+  - from: 求职补充手册.md
+    to: 求职补充手册.md
+mac:
+  category: public.app-category.developer-tools
+  identity: null
+  target:
+    - zip
+    - dmg
+asar: true
+asarUnpack:
+  - node_modules/@huggingface/**/*
+  - node_modules/onnxruntime-node/**/*
+  - '**/*.node'
