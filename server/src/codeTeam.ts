@@ -1,7 +1,10 @@
 /**
  * Chat「代码团队」：固定 explore → implement → review。
  * workspace_write 不直接落盘，发 tool_approval 挂起，等人 POST /api/chat/approve。
+ * 挂起记录写到磁盘：热重载后仍能按原参数批准/拒绝。
  */
+import fs from 'node:fs'
+import path from 'node:path'
 import OpenAI from 'openai'
 import type {
   ChatCompletionMessageParam,
@@ -9,6 +12,7 @@ import type {
   ChatCompletionTool,
 } from 'openai/resources/chat/completions'
 import { resolveLlmConfig } from './agent.js'
+import { DATA_DIR } from './paths.js'
 import { executeTool, getToolDefinitions } from './tools.js'
 import { getWorkspaceRoot, workspaceDigest } from './workspace.js'
 import type { AgentRole, ChatMessageInput, SseEvent } from './types.js'
@@ -17,28 +21,122 @@ type Send = (event: SseEvent) => void
 type Decision = 'approve' | 'deny'
 
 type Pending = {
-  resolve: (decision: Decision) => void
+  resolve: (decision: Decision, keepStore?: boolean) => void
   timer: ReturnType<typeof setTimeout>
 }
 
+type StoredPending = {
+  id: string
+  name: string
+  arguments: string
+  createdAt: number
+  expiresAt: number
+}
+
+export type ApproveResult =
+  | { ok: true; mode: 'live' }
+  | { ok: true; mode: 'orphan'; decision: Decision; result?: string; error?: string }
+  | { ok: false; error: string }
+
 const APPROVAL_MS = 5 * 60 * 1000
+const STORE = path.join(DATA_DIR, 'chat-approvals.json')
 const pending = new Map<string, Pending>()
 
 const EXPLORE_TOOLS = ['workspace_list', 'workspace_read', 'search_notes', 'git_status', 'git_diff']
 const IMPLEMENT_TOOLS = ['workspace_list', 'workspace_read', 'workspace_write', 'git_status', 'git_diff']
 const REVIEW_TOOLS = ['workspace_list', 'workspace_read', 'git_status', 'git_diff']
 
-export function resolveApproval(id: string, decision: Decision): boolean {
-  const item = pending.get(id)
-  if (!item) return false
-  item.resolve(decision)
-  return true
+function readStore(): StoredPending[] {
+  try {
+    const raw = JSON.parse(fs.readFileSync(STORE, 'utf8')) as unknown
+    if (!Array.isArray(raw)) return []
+    const now = Date.now()
+    return raw.filter(
+      (row): row is StoredPending =>
+        !!row &&
+        typeof row === 'object' &&
+        typeof (row as StoredPending).id === 'string' &&
+        typeof (row as StoredPending).name === 'string' &&
+        typeof (row as StoredPending).arguments === 'string' &&
+        typeof (row as StoredPending).expiresAt === 'number' &&
+        (row as StoredPending).expiresAt > now,
+    )
+  } catch {
+    return []
+  }
 }
 
-function waitForApproval(id: string, signal: AbortSignal): Promise<Decision> {
+function writeStore(rows: StoredPending[]) {
+  fs.mkdirSync(DATA_DIR, { recursive: true })
+  fs.writeFileSync(STORE, JSON.stringify(rows, null, 2))
+}
+
+function savePending(row: StoredPending) {
+  const rows = readStore().filter((r) => r.id !== row.id)
+  rows.push(row)
+  writeStore(rows)
+}
+
+function takeStored(id: string): StoredPending | null {
+  const rows = readStore()
+  const hit = rows.find((r) => r.id === id) ?? null
+  if (hit) writeStore(rows.filter((r) => r.id !== id))
+  return hit
+}
+
+function dropStored(id: string) {
+  writeStore(readStore().filter((r) => r.id !== id))
+}
+
+/** 内存里有挂起 → 唤醒 SSE 循环；否则从磁盘捞出孤儿写入直接落盘/拒绝 */
+export async function settleApproval(id: string, decision: Decision): Promise<ApproveResult> {
+  const live = pending.get(id)
+  if (live) {
+    live.resolve(decision)
+    return { ok: true, mode: 'live' }
+  }
+
+  const stored = takeStored(id)
+  if (!stored) {
+    return {
+      ok: false,
+      error: '没有这条待批准写入（可能已处理或超过 5 分钟）。请重新发一轮「代码团队」。',
+    }
+  }
+
+  if (decision === 'deny') {
+    return { ok: true, mode: 'orphan', decision: 'deny', error: '用户拒绝写入，文件未改' }
+  }
+
+  try {
+    const result = await executeTool(stored.name, stored.arguments)
+    return { ok: true, mode: 'orphan', decision: 'approve', result }
+  } catch (err) {
+    return {
+      ok: true,
+      mode: 'orphan',
+      decision: 'approve',
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
+function waitForApproval(
+  id: string,
+  name: string,
+  args: string,
+  signal: AbortSignal,
+): Promise<Decision> {
+  savePending({
+    id,
+    name,
+    arguments: args,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + APPROVAL_MS,
+  })
   return new Promise((resolve) => {
     let settled = false
-    const finish = (decision: Decision) => {
+    const finish = (decision: Decision, keepStore = false) => {
       if (settled) return
       settled = true
       const item = pending.get(id)
@@ -46,14 +144,16 @@ function waitForApproval(id: string, signal: AbortSignal): Promise<Decision> {
         clearTimeout(item.timer)
         pending.delete(id)
       }
+      // 连接断开（含热重载）保留磁盘记录，批准接口还能按原参数落盘
+      if (!keepStore) dropStored(id)
       signal.removeEventListener('abort', onAbort)
       resolve(decision)
     }
-    const onAbort = () => finish('deny')
-    const timer = setTimeout(() => finish('deny'), APPROVAL_MS)
+    const onAbort = () => finish('deny', true)
+    const timer = setTimeout(() => finish('deny', false), APPROVAL_MS)
     pending.set(id, { resolve: finish, timer })
     if (signal.aborted) {
-      finish('deny')
+      finish('deny', true)
       return
     }
     signal.addEventListener('abort', onAbort)
@@ -61,7 +161,11 @@ function waitForApproval(id: string, signal: AbortSignal): Promise<Decision> {
 }
 
 function rejectApprovals(ids: Iterable<string>) {
-  for (const id of ids) resolveApproval(id, 'deny')
+  for (const id of ids) {
+    const live = pending.get(id)
+    // 只唤醒内存 Promise，保留磁盘——热重载后仍可孤儿批准
+    if (live) live.resolve('deny', true)
+  }
 }
 
 function toolsNamed(names: string[]): ChatCompletionTool[] {
@@ -215,9 +319,16 @@ async function runOneTool(
   try {
     if (name === 'workspace_write') {
       const preview = writePreview(args)
-      send({ type: 'tool_approval', id: call.id, name, arguments: args, preview })
+      send({
+        type: 'tool_approval',
+        id: call.id,
+        name,
+        arguments: args,
+        preview,
+        expiresInMs: APPROVAL_MS,
+      })
       tracked.add(call.id)
-      const decision = await waitForApproval(call.id, signal)
+      const decision = await waitForApproval(call.id, name, args, signal)
       tracked.delete(call.id)
       if (decision !== 'approve') {
         const message = signal.aborted ? '已取消，未写入' : '用户拒绝写入，文件未改'
@@ -248,11 +359,11 @@ async function runRoleLive(
   send: Send,
   signal: AbortSignal,
   tracked: Set<string>,
+  stepRef: { n: number },
 ) {
   send({ type: 'role_start', role })
   const tools = toolsNamed(allowed)
   const toolRounds = maxToolRounds(role)
-  let step = 0
   let lastText = ''
   const maxToolsPerRound = 3
 
@@ -284,8 +395,8 @@ async function runRoleLive(
       if (delta?.tool_calls) {
         collectToolCallDeltas(toolAcc, delta.tool_calls)
         if (!stepped) {
-          step += 1
-          send({ type: 'step', index: step })
+          stepRef.n += 1
+          send({ type: 'step', index: stepRef.n })
           stepped = true
         }
         toolAcc.forEach((tool) => {
@@ -396,9 +507,16 @@ async function runMock(
   })
   send({ type: 'tool_start', id: writeId, name: 'workspace_write', arguments: args })
   const preview = writePreview(args)
-  send({ type: 'tool_approval', id: writeId, name: 'workspace_write', arguments: args, preview })
+  send({
+    type: 'tool_approval',
+    id: writeId,
+    name: 'workspace_write',
+    arguments: args,
+    preview,
+    expiresInMs: APPROVAL_MS,
+  })
   tracked.add(writeId)
-  const decision = await waitForApproval(writeId, signal)
+  const decision = await waitForApproval(writeId, 'workspace_write', args, signal)
   tracked.delete(writeId)
   if (decision === 'approve') {
     const result = await executeTool('workspace_write', args)
@@ -456,6 +574,7 @@ export async function runCodeTeamChat(options: {
       { role: 'implement', tools: IMPLEMENT_TOOLS },
       { role: 'review', tools: REVIEW_TOOLS },
     ]
+    const stepRef = { n: 0 }
 
     for (const stage of stages) {
       if (signal.aborted) break
@@ -473,6 +592,7 @@ export async function runCodeTeamChat(options: {
         send,
         signal,
         tracked,
+        stepRef,
       )
       if (text.trim()) {
         transcript.push({

@@ -9,7 +9,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import multer from 'multer'
 import { resolveLlmConfig, runAgentChat } from './agent.js'
-import { resolveApproval, runCodeTeamChat } from './codeTeam.js'
+import { settleApproval, runCodeTeamChat } from './codeTeam.js'
 import {
   importClaudeMcp,
   publicMcp,
@@ -1419,19 +1419,24 @@ app.post('/api/chat', async (req, res) => {
   }
 })
 
-/** 批准或拒绝代码团队挂起的 workspace_write */
-app.post('/api/chat/approve', (req, res) => {
+/** 批准或拒绝代码团队挂起的 workspace_write（热重载后仍可按磁盘记录落盘） */
+app.post('/api/chat/approve', async (req, res) => {
   const id = typeof req.body?.id === 'string' ? req.body.id : ''
   const decision = req.body?.decision === 'deny' ? 'deny' : req.body?.decision === 'approve' ? 'approve' : ''
   if (!id || !decision) {
     res.status(400).json({ error: '需要 id 和 decision（approve / deny）' })
     return
   }
-  if (!resolveApproval(id, decision)) {
-    res.status(404).json({ error: '没有这条待批准写入，可能已超时或已处理' })
-    return
+  try {
+    const settled = await settleApproval(id, decision)
+    if (!settled.ok) {
+      res.status(404).json({ error: settled.error })
+      return
+    }
+    res.json(settled)
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
   }
-  res.json({ ok: true })
 })
 
 /* ===================== 长期记忆 ===================== */

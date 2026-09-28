@@ -30,14 +30,74 @@
   margin-bottom: 0.35rem;
 }
 
+.msg__team {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.15rem 0.2rem;
+  margin: 0 0 0.55rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.msg__team-item {
+  display: inline-flex;
+  align-items: center;
+  color: #94a3b8;
+}
+
+.msg__team-item--active {
+  color: #0f766e;
+}
+
+.msg__team-item--done {
+  color: #334155;
+}
+
+.msg__team-arrow {
+  margin-right: 0.25rem;
+  color: #cbd5e1;
+  font-weight: 400;
+}
+
 .msg__role-bar {
   margin: 0.55rem 0 0.35rem;
   font-size: 0.75rem;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
+  padding: 0.28rem 0.55rem;
+  border-radius: 8px;
+  border-left: 3px solid #166534;
+  background: #ecfdf5;
   color: #166534;
-  border-bottom: 1px solid #bbf7d0;
-  padding-bottom: 0.2rem;
+}
+
+.msg__role-bar--explore {
+  border-left-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.msg__role-bar--implement {
+  border-left-color: #d97706;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.msg__role-bar--review {
+  border-left-color: #059669;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.msg__role-bar--done {
+  opacity: 0.72;
+  font-weight: 600;
 }
 
 .msg__process {

@@ -91,7 +91,22 @@ export async function streamChat(options: {
 }
 
 export async function postChatApprove(id: string, decision: 'approve' | 'deny') {
-  await axios.post(`${API_BASE}/api/chat/approve`, { id, decision })
+  try {
+    const { data } = await axios.post<{
+      ok: true
+      mode: 'live' | 'orphan'
+      decision?: 'approve' | 'deny'
+      result?: string
+      error?: string
+    }>(`${API_BASE}/api/chat/approve`, { id, decision })
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
 }
 
 /**

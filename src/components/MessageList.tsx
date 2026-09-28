@@ -26,6 +26,37 @@ function roleLabel(role: AgentRole) {
   return role
 }
 
+const TEAM_ROLES: AgentRole[] = ['explore', 'implement', 'review']
+
+function teamPipeline(parts: UiMessage['parts']) {
+  const state = new Map<AgentRole, 'pending' | 'active' | 'done'>()
+  for (const role of TEAM_ROLES) state.set(role, 'pending')
+  for (const part of parts ?? []) {
+    if (part.type !== 'role' || !TEAM_ROLES.includes(part.role)) continue
+    if (part.phase === 'start') state.set(part.role, 'active')
+    if (part.phase === 'done') state.set(part.role, 'done')
+  }
+  return TEAM_ROLES.map((role) => ({ role, status: state.get(role) ?? 'pending' }))
+}
+
+function TeamStrip({ message }: { message: UiMessage }) {
+  const pipe = teamPipeline(message.parts)
+  if (!pipe.some((p) => p.status !== 'pending')) return null
+  return (
+    <ol className="msg__team" aria-label="代码团队进度">
+      {pipe.map((item, i) => (
+        <li key={item.role} className={`msg__team-item msg__team-item--${item.status}`}>
+          {i > 0 && <span className="msg__team-arrow" aria-hidden>→</span>}
+          <span>
+            {item.status === 'done' ? '✓ ' : item.status === 'active' ? '● ' : '○ '}
+            {roleLabel(item.role)}
+          </span>
+        </li>
+      ))}
+    </ol>
+  )
+}
+
 function groupSteps(tools: ToolCallView[]) {
   const groups: Array<{ step: number; tools: ToolCallView[] }> = []
   for (const tool of tools) {
@@ -44,7 +75,7 @@ function StepBlocks({
 }: {
   tools: ToolCallView[]
   cited: Set<number> | null
-  onApprove?: (id: string, decision: 'approve' | 'deny') => void
+  onApprove?: (id: string, decision: 'approve' | 'deny') => void | Promise<void>
 }) {
   const groups = groupSteps(tools)
   return (
@@ -72,7 +103,7 @@ function MessageProcess({
   tools: ToolCallView[]
   streaming: boolean
   cited: Set<number> | null
-  onApprove?: (id: string, decision: 'approve' | 'deny') => void
+  onApprove?: (id: string, decision: 'approve' | 'deny') => void | Promise<void>
 }) {
   if (!tools.length) return null
   const running =
@@ -250,7 +281,7 @@ function AssistantBody({
   onApprove,
 }: {
   message: UiMessage
-  onApprove?: (id: string, decision: 'approve' | 'deny') => void
+  onApprove?: (id: string, decision: 'approve' | 'deny') => void | Promise<void>
 }) {
   const streaming = message.status === 'streaming'
   const cited = streaming ? null : citationNumbers(message.content)
@@ -261,14 +292,24 @@ function AssistantBody({
     message.tools.every((tool) => tool.status !== 'running' && tool.status !== 'awaiting_approval')
   return (
     <>
+      <TeamStrip message={message} />
       {waiting && <div className="msg__content muted">思考中…</div>}
       {runs.map((run, index) => {
         const last = index === runs.length - 1
         if (run.kind === 'role') {
-          if (run.phase === 'done') return null
+          if (run.phase === 'done') {
+            return (
+              <div
+                key={index}
+                className={`msg__role-bar msg__role-bar--${run.role} msg__role-bar--done`}
+              >
+                {roleLabel(run.role)} · 完成
+              </div>
+            )
+          }
           return (
-            <div key={index} className="msg__role-bar">
-              {roleLabel(run.role)}
+            <div key={index} className={`msg__role-bar msg__role-bar--${run.role}`}>
+              {roleLabel(run.role)} · 进行中
             </div>
           )
         }
@@ -313,20 +354,36 @@ function AssistantBody({
 export function MessageList({
   messages,
   onApprove,
+  codeTeam = false,
 }: {
   messages: UiMessage[]
-  onApprove?: (id: string, decision: 'approve' | 'deny') => void
+  onApprove?: (id: string, decision: 'approve' | 'deny') => void | Promise<void>
+  codeTeam?: boolean
 }) {
   // 还没聊过：显示空状态引导
   if (messages.length === 0) {
     return (
       <div className="empty">
-        <h2>Agent Chat Playground</h2>
-        <p>流式对话 + 工具卡片 + 已连接 Skill。无 API Key 也能用 mock 演示。</p>
+        <h2>{codeTeam ? '代码团队' : 'Agent Chat Playground'}</h2>
+        <p>
+          {codeTeam
+            ? '探索 → 改码 → 评审。写文件前会停住等人批准（对齐 OpenHands / OMA）。先连底部工作区。'
+            : '流式对话 + 工具卡片 + 已连接 Skill。无 API Key 也能用 mock 演示。'}
+        </p>
         <ul>
-          <li>现在几点了？（只调工具）</li>
-          <li>这个项目的技术栈是什么？（只检索）</li>
-          <li>请按面试口径介绍这个项目（先 load skill 再检索）</li>
+          {codeTeam ? (
+            <>
+              <li>看一下这个仓库怎么组织的（探索摸底）</li>
+              <li>给 README 加一句项目说明（改码要批准）</li>
+              <li>当前改了什么？（评审看 diff）</li>
+            </>
+          ) : (
+            <>
+              <li>现在几点了？（只调工具）</li>
+              <li>这个项目的技术栈是什么？（只检索）</li>
+              <li>请按面试口径介绍这个项目（先 load skill 再检索）</li>
+            </>
+          )}
         </ul>
       </div>
     )
@@ -337,7 +394,9 @@ export function MessageList({
       {messages.map((m) => (
         <article key={m.id} className={`msg msg--${m.role}`}>
           {/* 角色标签 */}
-          <div className="msg__role">{m.role === 'user' ? '你' : '助手'}</div>
+          <div className="msg__role">
+            {m.role === 'user' ? '你' : codeTeam || teamPipeline(m.parts).some((p) => p.status !== 'pending') ? '代码团队' : '助手'}
+          </div>
 
           {m.role === 'assistant' ? (
             <AssistantBody message={m} onApprove={onApprove} />

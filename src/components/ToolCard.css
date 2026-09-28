@@ -187,3 +187,15 @@
   background: #fee2e2;
   color: #991b1b;
 }
+
+.tool-card__ok:disabled,
+.tool-card__no:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.tool-card__deadline {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  color: #9a3412;
+}

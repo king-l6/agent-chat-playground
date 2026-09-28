@@ -1,7 +1,9 @@
 /**
  * 单张 Tool Calling 卡片。
  * 先给能读的摘要（检索轨迹、算式、Skill 名），原始 JSON 收在折叠里。
+ * 代码团队的 workspace_write 会停在 awaiting_approval，对齐 OpenHands 确认卡。
  */
+import { useEffect, useState } from 'react'
 import type { ToolCallView } from '../types'
 import {
   formatScore,
@@ -126,6 +128,14 @@ function formatJson(raw: string) {
   }
 }
 
+function formatRemain(ms: number) {
+  if (ms <= 0) return '即将超时'
+  const sec = Math.ceil(ms / 1000)
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return m > 0 ? `${m}:${String(s).padStart(2, '0')} 后自动拒绝` : `${s}s 后自动拒绝`
+}
+
 export function ToolCard({
   tool,
   cited = null,
@@ -133,16 +143,48 @@ export function ToolCard({
 }: {
   tool: ToolCallView
   cited?: Set<number> | null
-  onApprove?: (id: string, decision: 'approve' | 'deny') => void
+  onApprove?: (id: string, decision: 'approve' | 'deny') => void | Promise<void>
 }) {
   const skill = tool.name === 'load_skill'
   const skillName = skill ? summarizeTool(tool) : null
   const title =
     skill && skillName?.kind === 'skill' && skillName.name
       ? `skill:${skillName.name}`
-      : tool.name
+      : tool.name === 'workspace_write' && tool.status === 'awaiting_approval'
+        ? '拟写入'
+        : tool.name
   const raw = tool.status === 'done' ? rawPayload(tool) : formatJson(tool.arguments || '')
   const waiting = tool.status === 'awaiting_approval'
+  const [busy, setBusy] = useState(false)
+  const [remain, setRemain] = useState(() =>
+    tool.expiresAt ? Math.max(0, tool.expiresAt - Date.now()) : null,
+  )
+
+  useEffect(() => {
+    if (!waiting || tool.expiresAt == null) {
+      setRemain(null)
+      return
+    }
+    const tick = () => setRemain(Math.max(0, (tool.expiresAt ?? 0) - Date.now()))
+    tick()
+    const id = window.setInterval(tick, 1000)
+    return () => window.clearInterval(id)
+  }, [waiting, tool.expiresAt])
+
+  useEffect(() => {
+    if (!waiting) setBusy(false)
+  }, [waiting, tool.status])
+
+  async function decide(decision: 'approve' | 'deny') {
+    if (!onApprove || busy) return
+    setBusy(true)
+    try {
+      await onApprove(tool.id, decision)
+    } finally {
+      // 成功会变成 running/done；失败 App 会回滚 awaiting，这里放开按钮
+      setBusy(false)
+    }
+  }
 
   return (
     <div className={`tool-card tool-card--${tool.status}${skill ? ' tool-card--skill' : ''}`}>
@@ -156,18 +198,31 @@ export function ToolCard({
           <code>{tool.preview}</code>
         </pre>
       )}
+      {waiting && remain != null && (
+        <p className="tool-card__deadline">{formatRemain(remain)}</p>
+      )}
       {waiting && onApprove && (
         <div className="tool-card__actions">
-          <button type="button" className="tool-card__ok" onClick={() => onApprove(tool.id, 'approve')}>
-            批准写入
+          <button
+            type="button"
+            className="tool-card__ok"
+            disabled={busy}
+            onClick={() => void decide('approve')}
+          >
+            {busy ? '提交中…' : '批准写入'}
           </button>
-          <button type="button" className="tool-card__no" onClick={() => onApprove(tool.id, 'deny')}>
+          <button
+            type="button"
+            className="tool-card__no"
+            disabled={busy}
+            onClick={() => void decide('deny')}
+          >
             拒绝
           </button>
         </div>
       )}
       {tool.error && <div className="tool-card__error">{tool.error}</div>}
-      {raw.trim() && (
+      {raw.trim() && !waiting && (
         <details className="tool-card__raw">
           <summary>参数与返回</summary>
           <pre className="tool-card__block">

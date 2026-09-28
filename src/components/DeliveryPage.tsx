@@ -79,8 +79,8 @@ const TIMELINE_ROLES: TimelineRole[] = ['pm', 'dev', 'review', 'qa']
 function roleName(role: TimelineRole) {
   if (role === 'pm') return '产品'
   if (role === 'dev') return '研发'
-  if (role === 'review') return '评审'
-  return '测试'
+  if (role === 'review') return '评审(测)'
+  return '测试签字'
 }
 
 function timelineFromPhase(phase: DeliveryRun['phase']): TimelineItem[] {
@@ -259,6 +259,9 @@ export function DeliveryPage() {
   async function onReset() {
     setError('')
     setPrompt('')
+    setStickyDiff('')
+    setGateNote(null)
+    setTimeline(null)
     setRun(await resetDelivery())
   }
 
@@ -501,8 +504,11 @@ export function DeliveryPage() {
       )}
       {diff ? (
         <details className="desk__diff" open>
-          <summary>文件变更</summary>
+          <summary>文件变更{diff.length > 8000 ? ' · 已截断' : ''}</summary>
           <pre>{diff.slice(0, 8000)}</pre>
+          {diff.length > 8000 ? (
+            <p className="desk__muted">全文 {diff.length} 字，这里只展示前 8000。</p>
+          ) : null}
         </details>
       ) : null}
       {run.review?.comments.map((c) => (

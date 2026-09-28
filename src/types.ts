@@ -24,6 +24,8 @@ export interface ToolCallView {
   status: 'running' | 'done' | 'error' | 'awaiting_approval'
   /** 待批准写入时给卡片看的短预览 */
   preview?: string
+  /** 批准截止时间戳（本地 Date.now） */
+  expiresAt?: number
   /** 成功时工具返回的内容（通常是 JSON 字符串） */
   result?: string
   /** 失败时的错误信息 */
@@ -99,7 +101,14 @@ export type SseEvent =
   | { type: 'tool_result'; id: string; name: string; result: string }
   /** 工具执行失败：把对应卡片改成 error */
   | { type: 'tool_error'; id: string; name: string; error: string }
-  | { type: 'tool_approval'; id: string; name: string; arguments: string; preview?: string }
+  | {
+      type: 'tool_approval'
+      id: string
+      name: string
+      arguments: string
+      preview?: string
+      expiresInMs?: number
+    }
   /** 本轮对话正常结束，前端可以重新允许发送 */
   | { type: 'done' }
   /** 整轮出错（网络/模型异常等），前端展示错误并可结束 busy */

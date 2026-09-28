@@ -50,7 +50,15 @@ export type SseEvent =
   /** 工具失败 */
   | { type: 'tool_error'; id: string; name: string; error: string }
   /** 写入工作区前等人点批准，arguments 是完整参数，preview 是给卡片看的摘要 */
-  | { type: 'tool_approval'; id: string; name: string; arguments: string; preview?: string }
+  | {
+      type: 'tool_approval'
+      id: string
+      name: string
+      arguments: string
+      preview?: string
+      /** 多少毫秒后自动拒绝，前端用来倒计时 */
+      expiresInMs?: number
+    }
   /** 本轮结束 */
   | { type: 'done' }
   /** 整轮异常 */

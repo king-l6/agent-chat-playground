@@ -4,7 +4,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { streamChat, toApiMessages, fetchHealth, postChatApprove, type RagStatus, type SkillMeta, type McpPublic } from './api/chat';
-import type { SseEvent, UiMessage, MessagePart } from './types';
+import type { SseEvent, UiMessage, MessagePart, ToolCallView } from './types';
 import { MessageList } from './components/MessageList';
 import { DocumentsPage } from './components/DocumentsPage';
 import { MemoryPage } from './components/MemoryPage';
@@ -310,6 +310,7 @@ export default function App() {
           preview: event.preview,
           step: base.step ?? 1,
           startedAt: Date.now(),
+          expiresAt: event.expiresInMs ? Date.now() + event.expiresInMs : undefined,
         }
         return {
           ...base,
@@ -477,21 +478,74 @@ export default function App() {
   }
 
   async function onApproveTool(id: string, decision: 'approve' | 'deny') {
+    const snapshot = new Map<string, ToolCallView['status']>()
     setSessions((prev) =>
       prev.map((s) => ({
         ...s,
         messages: s.messages.map((m) => ({
           ...m,
-          tools: m.tools.map((t) =>
-            t.id === id && t.status === 'awaiting_approval' ? { ...t, status: 'running' as const } : t,
-          ),
+          tools: m.tools.map((t) => {
+            if (t.id !== id || t.status !== 'awaiting_approval') return t
+            snapshot.set(t.id, t.status)
+            return { ...t, status: 'running' as const }
+          }),
         })),
       })),
     )
     try {
-      await postChatApprove(id, decision)
+      const settled = await postChatApprove(id, decision)
+      // 热重载后 SSE 已断：接口直接落盘，用返回结果更新卡片
+      if (settled.mode === 'orphan') {
+        setSessions((prev) =>
+          prev.map((s) => ({
+            ...s,
+            messages: s.messages.map((m) => ({
+              ...m,
+              tools: m.tools.map((t) => {
+                if (t.id !== id) return t
+                if (settled.decision === 'approve' && settled.result) {
+                  return {
+                    ...t,
+                    status: 'done' as const,
+                    result: settled.result,
+                    ms: t.startedAt ? Date.now() - t.startedAt : t.ms,
+                    startedAt: undefined,
+                  }
+                }
+                return {
+                  ...t,
+                  status: 'error' as const,
+                  error: settled.error || (settled.decision === 'deny' ? '用户拒绝写入，文件未改' : '写入失败'),
+                  startedAt: undefined,
+                }
+              }),
+            })),
+          })),
+        )
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      setSessions((prev) =>
+        prev.map((s) => ({
+          ...s,
+          messages: s.messages.map((m) => ({
+            ...m,
+            tools: m.tools.map((t) => {
+              if (t.id !== id) return t
+              if (/没有这条待批准|超时|已处理/.test(message)) {
+                return {
+                  ...t,
+                  status: 'error' as const,
+                  error: message,
+                  startedAt: undefined,
+                }
+              }
+              return snapshot.has(t.id) ? { ...t, status: 'awaiting_approval' as const } : t
+            }),
+          })),
+        })),
+      )
     }
   }
 
@@ -516,7 +570,7 @@ export default function App() {
                 : ''}
           </p>
         )}
-        <MessageList messages={messages} onApprove={onApproveTool} />
+        <MessageList messages={messages} onApprove={onApproveTool} codeTeam={codeTeam} />
         <div ref={bottomRef} />
       </main>
 
