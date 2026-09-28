@@ -16,7 +16,12 @@ import {
   reconnectMcp,
   saveMcpSettings,
 } from './mcp.js'
-import { publicLlmSettings, saveLlmSettings, type LlmMode } from './settings.js'
+import {
+  publicLlmSettings,
+  resolveContextWindow,
+  saveLlmSettings,
+  type LlmMode,
+} from './settings.js'
 import { IMAGE_ROUTE, imageFileById, isImageId, mimeOf } from './imageCache.js'
 import {
   applyGate,
@@ -117,6 +122,12 @@ app.get('/api/health', (_req, res) => {
     ok: true,
     mode: apiKey ? 'live' : 'mock',
     model,
+    /*
+     * 前端「上下文用量」环的分母（token）。
+     * 优先级（面板 → 环境变量 → 32k 兜底）只在 settings.resolveContextWindow 里算一次，
+     * 这里不重复判断，前端也不自己猜。
+     */
+    contextWindow: resolveContextWindow(),
     rag: getRagStatus(),
     skills: listSkills(),
     mcp: publicMcp(),
@@ -610,6 +621,17 @@ app.get('/api/settings', (_req, res) => {
   res.json(publicLlmSettings())
 })
 
+/**
+ * 面板传来的上下文窗口：数字或数字串都收。
+ * 不传 / 传 null → undefined（＝不动这个字段）；空串、0、乱写 → 数字，由
+ * settings.saveLlmSettings 按「收不成正整数就清掉、回落环境变量或默认」处理。
+ */
+function parseContextWindow(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0
+  if (typeof value === 'string') return Number(value.trim() || 0)
+  return undefined
+}
+
 app.put('/api/settings', (req, res) => {
   const mode = req.body?.mode
   if (mode !== 'mock' && mode !== 'live') {
@@ -622,6 +644,8 @@ app.put('/api/settings', (req, res) => {
       apiKey: typeof req.body?.apiKey === 'string' ? req.body.apiKey : undefined,
       baseURL: typeof req.body?.baseURL === 'string' ? req.body.baseURL : undefined,
       model: typeof req.body?.model === 'string' ? req.body.model : undefined,
+      // 原样透传：undefined 语义就是「不改」，别在这里填默认值
+      contextWindow: parseContextWindow(req.body?.contextWindow),
     })
     res.json(saved)
   } catch (err) {
@@ -1371,6 +1395,11 @@ app.post('/api/chat', async (req, res) => {
   }
 
   const chatMode = req.body?.mode === 'code_team' ? 'code_team' : 'default'
+  /*
+   * 「自动批准写入」开关：打开后本轮后续 workspace_write 不再逐条挂起等人点。
+   * 高风险文件（.env / 密钥 / CI）后端仍会拦，见 codeTeam.canAutoApprove。
+   */
+  const autoApprove = req.body?.autoApprove === true
 
   // 只保留合法 user/assistant，并截断过长 content，防滥用
   const normalized = messages
@@ -1406,7 +1435,12 @@ app.post('/api/chat', async (req, res) => {
 
   try {
     if (chatMode === 'code_team') {
-      await runCodeTeamChat({ messages: normalized, send, signal: abort.signal })
+      await runCodeTeamChat({
+        messages: normalized,
+        send,
+        signal: abort.signal,
+        autoApprove,
+      })
     } else {
       await runAgentChat({ messages: normalized, send })
     }
@@ -1419,7 +1453,10 @@ app.post('/api/chat', async (req, res) => {
   }
 })
 
-/** 批准或拒绝代码团队挂起的 workspace_write（热重载后仍可按磁盘记录落盘） */
+/**
+ * 批准或拒绝代码团队挂起的 workspace_write（热重载后仍可按磁盘记录落盘）
+ * body.all = true 表示「全部批准」：这一条放行的同时，本轮后续低/中风险写入也不再逐条问。
+ */
 app.post('/api/chat/approve', async (req, res) => {
   const id = typeof req.body?.id === 'string' ? req.body.id : ''
   const decision = req.body?.decision === 'deny' ? 'deny' : req.body?.decision === 'approve' ? 'approve' : ''
@@ -1428,7 +1465,7 @@ app.post('/api/chat/approve', async (req, res) => {
     return
   }
   try {
-    const settled = await settleApproval(id, decision)
+    const settled = await settleApproval(id, decision, { all: req.body?.all === true })
     if (!settled.ok) {
       res.status(404).json({ error: settled.error })
       return

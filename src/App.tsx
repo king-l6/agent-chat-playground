@@ -1,11 +1,15 @@
-/**
- * 根组件：左侧 AgentOS 导航 + 各页内容
- * 聊天页按会话存 messages，SSE 写回对应会话，互不覆盖
- */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { streamChat, toApiMessages, fetchHealth, postChatApprove, type RagStatus, type SkillMeta, type McpPublic } from './api/chat';
 import type { SseEvent, UiMessage, MessagePart, ToolCallView } from './types';
+import {
+  CONTEXT_WINDOW_TOKENS,
+  contextRatioOf,
+  contextWarnOf,
+  estimateOutgoingTokens,
+  formatTokens,
+} from './lib/contextUsage';
 import { MessageList } from './components/MessageList';
+import { ChatOutline } from './components/ChatOutline';
 import { DocumentsPage } from './components/DocumentsPage';
 import { MemoryPage } from './components/MemoryPage';
 import { VectorsPage } from './components/VectorsPage';
@@ -28,6 +32,13 @@ import './components/AppShell.css';
 
 /** 输入框自动长高的上限（px）。和 AppShell.css 里 .composer textarea 的 max-height 必须一致 */
 const COMPOSER_MAX_HEIGHT = 180
+
+/**
+ * 用量环的几何：viewBox 是 0 0 24 24、圆心 (12,12)。
+ * 这里的半径必须和 AppShell.css 的 .ctx__ring 尺寸、SVG 里的 r 一致。
+ */
+const RING_RADIUS = 9
+const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS
 
 /** 文字和思考会粘到上一个同类零件上；工具另起一块 */
 function withTtft(m: UiMessage): UiMessage {
@@ -69,7 +80,7 @@ export default function App() {
   const [activeId, setActiveId] = useState(() => boot.activeId);
   /** 各会话自己的草稿，切换时不丢 */
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  /** 正在生成的会话 id；别的会话仍可发送 */
+  /** 正在生成的会话 id（有至少一条流在跑）；用来在列表里标「生成中」 */
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
   /** 右上角徽章：live / mock / 未连接 */
   const [mode, setMode] = useState<'live' | 'mock' | 'unknown'>('unknown');
@@ -84,16 +95,61 @@ export default function App() {
   /** 顶部/底部错误条 */
   const [error, setError] = useState<string>('');
   const [codeTeam, setCodeTeam] = useState(() => localStorage.getItem('agentos.codeTeam') === '1');
-  /** 每个会话一份 AbortController，停止只打断当前这条 */
-  const abortMap = useRef(new Map<string, AbortController>());
+  /**
+   * 上下文窗口（token）＝用量环的分母。
+   * 真值从 /api/health 的 contextWindow 来（后端 settings.resolveContextWindow 算好的）；
+   * CONTEXT_WINDOW_TOKENS 只在 health 还没回来 / 请求失败时兜底，别在这里另写一个数。
+   *
+   * 更新时机只有两处：①挂载时 fetchHealth 一次；②「配置」页保存后由 onSaved 带回来。
+   * 少了第②处的话，改完上下文窗口不刷新整页，分母一直是旧值（那正是环看起来算错的原因之一）。
+   */
+  const [windowTokens, setWindowTokens] = useState<number>(CONTEXT_WINDOW_TOKENS);
+  /**
+   * 每个会话可以有**多条**流同时在跑：生成中继续发 = 插话，新的一轮直接发出去，
+   * 不等前一轮结束（两条 SSE 各写各的助手气泡，patchAssistant 按 assistantId 定位，不会串）。
+   * 外层 key 是会话 id，内层 key 是这一轮 assistantId。
+   */
+  const runMap = useRef(new Map<string, Map<string, AbortController>>());
+  /** 已经收到 done 的轮次（按 assistantId 记）；收尾 Network Error 时靠它决定是否吞掉 */
+  const doneRuns = useRef(new Set<string>());
   /** 锚点：当前会话有新消息就滚到底部 */
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  /** 消息区滚动容器：生成时用户往上翻就不强行拽回底部；也是右侧目录（ChatOutline）的定位基准 */
+  const mainRef = useRef<HTMLElement | null>(null);
+  const stickBottom = useRef(true);
   /** 输入框本体：自动长高要直接改它的 style.height */
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const active = sessions.find((s) => s.id === activeId) ?? sessions[0];
   const messages = active?.messages ?? [];
   const input = active ? (drafts[active.id] ?? '') : '';
   const activeBusy = active ? busyIds.has(active.id) : false;
+  /**
+   * 上下文用量估算（见 lib/contextUsage.ts，按字符粗估，不是精确 token）。
+   *
+   * 口径必须与 onSend 真正发出去的那份 history 一致，否则环上的数字和模型看到的是两个集合：
+   *   1) toApiMessages 只留 role + content —— 工具卡片的 arguments / result 不会发回后端
+   *      （后端只在本轮的 maxRounds 循环里用一次，跨轮不保留）；
+   *   2) 排除正在流式的那条 —— onSend 里的 prior 就是这么过滤的；
+   *   3) 单条按 OUTGOING_CONTENT_LIMIT 截断，与后端 /api/chat 的 8000 字符一致。
+   *
+   * 它仍然是**下限**：system prompt、工具 schema、skill 正文前端拿不到，真实占用会更高。
+   */
+  const contextUsed = useMemo(
+    () => estimateOutgoingTokens(toApiMessages(messages.filter((m) => m.status !== 'streaming'))),
+    [messages],
+  );
+  /** 比例收在 [0,1] 再给环形用：溢出会让 dashoffset 算出负数、环画反 */
+  const contextRatio = contextRatioOf(contextUsed, windowTokens);
+  /**
+   * 预警线**不是**固定的 0.8 百分比，而是「窗口 − 预留」（见 lib/contextUsage.ts 的
+   * CONTEXT_RESERVE_TOKENS）：
+   *   - 窗口是输入和输出**共用**的，history 占掉一部分后还得留出模型写本轮回答、
+   *     以及 agent 工具轮再跑几圈的余量；
+   *   - 固定比例给不出这个余量：8k 窗口下 80% 只留 1.6k，200k 窗口下留 40k，
+   *     差 25 倍，没法回答「为什么现在该开新会话」。
+   * 旧的 CONTEXT_WARN_RATIO 已标 @deprecated，别再用。
+   */
+  const contextWarn = contextWarnOf(contextUsed, windowTokens);
 
   useEffect(() => {
     const onHash = () => setPage(pageFromHash());
@@ -155,25 +211,42 @@ export default function App() {
         if (data.rag) setRag(data.rag);
         if (data.skills) setSkills(data.skills);
         if (data.mcp) setMcp(data.mcp);
+        // 真实分母：后端按「面板 → 环境变量 → 兜底」算好的窗口大小
+        if (data.contextWindow) setWindowTokens(data.contextWindow);
       })
       .catch(() => setMode('unknown'));
   }, []);
 
-  // 有新消息就平滑滚到底
+  /*
+   * 贴底时才跟着新内容滚；用户往上翻就停住。
+   * 用瞬时定位（不给 behavior: 'smooth'）：流式时每个 delta 都会跑一次这个 effect，
+   * 平滑动画会被下一个 delta 反复打断，观感和性能都更差。
+   */
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!stickBottom.current) return
+    bottomRef.current?.scrollIntoView()
   }, [messages]);
 
-  /**
-   * 只更新指定 id 的那条助手消息（不可变更新）
-   * updater 收到旧消息，返回新消息对象
-   */
+  function onMainScroll() {
+    const el = mainRef.current
+    if (!el) return
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickBottom.current = gap < 80
+  }
+
   function setInput(value: string) {
     if (!active) return
     const id = active.id
     setDrafts((prev) => ({ ...prev, [id]: value }))
   }
 
+  /**
+   * 流式事件写回助手消息。
+   *
+   * 这里只推 `updatedAt`（「最近活动」，含每个 token），**绝不能碰 `lastUserAt`**：
+   * 那是左侧历史列表的排序 / 分组键，只有用户提问才该推进。一旦在这里顺手刷它，
+   * 多个会话同时生成时谁刚吐字谁就窜到列表最前面，列表上下反复换位。
+   */
   function patchAssistant(
     sessionId: string,
     assistantId: string,
@@ -308,9 +381,13 @@ export default function App() {
           arguments: event.arguments,
           status: 'awaiting_approval' as const,
           preview: event.preview,
+          path: event.path,
+          before: event.before,
+          after: event.after,
+          risk: event.risk,
+          riskReason: event.riskReason,
           step: base.step ?? 1,
           startedAt: Date.now(),
-          expiresAt: event.expiresInMs ? Date.now() + event.expiresInMs : undefined,
         }
         return {
           ...base,
@@ -333,6 +410,7 @@ export default function App() {
       return;
     }
     if (event.type === 'done') {
+      doneRuns.current.add(assistantId);
       patchAssistant(sessionId, assistantId, (m) => ({
         ...m,
         status: 'done',
@@ -343,14 +421,56 @@ export default function App() {
   }
 
   /**
-   * 发送一轮对话
-   * @param text 可选：快捷提示按钮传入；不传则用输入框
+   * 开一条流：登记进 runMap，顺便把会话标成「生成中」。
+   * 支持同会话多条并存——这是「生成中继续发」的基础。
    */
-  function markBusy(sessionId: string, on: boolean) {
+  function addRun(sessionId: string, runId: string, controller: AbortController) {
+    const runs = runMap.current.get(sessionId) ?? new Map<string, AbortController>()
+    runs.set(runId, controller)
+    runMap.current.set(sessionId, runs)
     setBusyIds((prev) => {
+      if (prev.has(sessionId)) return prev
       const next = new Set(prev)
-      if (on) next.add(sessionId)
-      else next.delete(sessionId)
+      next.add(sessionId)
+      return next
+    })
+  }
+
+  /** 收掉一条流：该会话再没有别的流时才算「不忙」 */
+  function endRun(sessionId: string, runId: string) {
+    /*
+     * 这条流彻底结束了，顺手清掉它的「已 done」标记。
+     * done 判断只在同一轮的收尾（catch 里的 softNet 分支）用到，而那段逻辑在 finally 之前，
+     * 所以这里删不会漏掉判断；不删的话这个 Set 在长会话里只增不减。
+     */
+    doneRuns.current.delete(runId)
+    const runs = runMap.current.get(sessionId)
+    if (runs) {
+      runs.delete(runId)
+      if (runs.size > 0) return
+      runMap.current.delete(sessionId)
+    }
+    setBusyIds((prev) => {
+      if (!prev.has(sessionId)) return prev
+      const next = new Set(prev)
+      next.delete(sessionId)
+      return next
+    })
+  }
+
+  /** 停掉某个会话的所有流（删除会话时用） */
+  function abortSession(sessionId: string) {
+    const runs = runMap.current.get(sessionId)
+    if (!runs) return
+    runMap.current.delete(sessionId)
+    for (const [runId, controller] of runs) {
+      doneRuns.current.delete(runId)
+      controller.abort()
+    }
+    setBusyIds((prev) => {
+      if (!prev.has(sessionId)) return prev
+      const next = new Set(prev)
+      next.delete(sessionId)
       return next
     })
   }
@@ -372,9 +492,7 @@ export default function App() {
   }
 
   function removeSession(id: string) {
-    abortMap.current.get(id)?.abort()
-    abortMap.current.delete(id)
-    markBusy(id, false)
+    abortSession(id)
     const rest = sessions.filter((s) => s.id !== id)
     const next = rest.length > 0 ? rest : [blankSession()]
     const nextActive = activeId === id ? next[0].id : activeId
@@ -383,16 +501,30 @@ export default function App() {
     saveSessions(nextActive, next)
   }
 
+  /**
+   * 发送一轮对话。
+   *
+   * 生成中也能发（不用等上一条做完）：这里**不再**因为 busy 就 return。
+   * 发给后端的 history 只带「已完成的消息」——正在流式的那条会被过滤掉，
+   * 于是新一轮的输入恰好是「历史 + 我刚发的新消息」，不会被自己的半截回答干扰。
+   *
+   * 注意这份 prior 也正是用量环分子的口径（见上面 contextUsed 的注释）：
+   * 两处必须用同一个过滤条件，改一处要同步另一处。
+   *
+   * @param text 可选：快捷提示按钮传入；不传则用输入框
+   */
   async function onSend(text?: string) {
     const sessionId = active?.id
     if (!sessionId) return
     const content = (text ?? input).trim();
-    if (!content || busyIds.has(sessionId)) return;
+    if (!content) return;
 
     setError('');
     setDrafts((prev) => ({ ...prev, [sessionId]: '' }));
+    stickBottom.current = true;
 
-    const prior = messages
+    // 流式中的回答不算「历史」：它还没说完，带上会让模型看着半截话继续编
+    const prior = messages.filter((m) => m.status !== 'streaming')
     const userMsg: UiMessage = {
       id: uid(),
       role: 'user',
@@ -418,6 +550,15 @@ export default function App() {
         return {
           ...s,
           title: sessionTitle(nextMessages),
+          /*
+           * 这里是**唯一**推进 lastUserAt 的地方：用户提问 = 列表排序 / 分组 / 显示日期的时间。
+           * 分桶/排序只认固定历史（这次提问），所以之后不管流式吐多少 token，
+           * 这个会话在列表里的位置和它所在的分组都不会再动。
+           *
+           * updatedAt 仍照常刷新（活动时间，别的地方要看「最近动过」）；
+           * 两者分工别调换，详见 REPO_MAP.md 第 3.2 节。
+           */
+          lastUserAt: Date.now(),
           updatedAt: Date.now(),
           messages: nextMessages,
         }
@@ -425,10 +566,9 @@ export default function App() {
       saveSessions(sessionId, next)
       return next
     })
-    markBusy(sessionId, true);
 
     const controller = new AbortController();
-    abortMap.current.set(sessionId, controller);
+    addRun(sessionId, assistantId, controller);
 
     try {
       await streamChat({
@@ -458,26 +598,59 @@ export default function App() {
         }));
       } else {
         const message = err instanceof Error ? err.message : String(err);
-        setError(message);
-        patchAssistant(sessionId, assistantId, (m) => ({
-          ...m,
-          status: 'error',
-          content: m.content || `出错了：${message}`,
-          totalMs: m.startedAt ? Date.now() - m.startedAt : m.totalMs,
-          startedAt: undefined,
-        }));
+        const softNet =
+          /network error|连接中断|可以忽略|failed to fetch|err_network/i.test(message);
+        // 长 SSE 收尾：这一轮已经 done 的话，axios/代理抛的 Network Error 直接吞掉
+        if (doneRuns.current.has(assistantId) && softNet) {
+          /* no-op */
+        } else if (softNet) {
+          const cur = snap.current.sessions
+            .find((s) => s.id === sessionId)
+            ?.messages.find((m) => m.id === assistantId);
+          const hasWork = !!(cur?.content || cur?.tools.length);
+          patchAssistant(sessionId, assistantId, (m) => ({
+            ...m,
+            status: hasWork || m.status === 'done' ? 'done' : 'error',
+            content: hasWork || m.content ? m.content : `出错了：${message}`,
+            totalMs: m.startedAt ? Date.now() - m.startedAt : m.totalMs,
+            startedAt: undefined,
+          }));
+          if (!hasWork) setError(message);
+        } else {
+          setError(message);
+          patchAssistant(sessionId, assistantId, (m) => ({
+            ...m,
+            status: 'error',
+            content: m.content || `出错了：${message}`,
+            totalMs: m.startedAt ? Date.now() - m.startedAt : m.totalMs,
+            startedAt: undefined,
+          }));
+        }
       }
     } finally {
-      markBusy(sessionId, false);
-      abortMap.current.delete(sessionId);
+      endRun(sessionId, assistantId);
     }
   }
 
+  /** 停止：打断**最新**那条流（生成中还能继续发，所以一个会话可能同时有多条） */
   function onStop() {
-    if (active) abortMap.current.get(active.id)?.abort();
+    if (!active) return
+    const runs = runMap.current.get(active.id)
+    if (!runs || runs.size === 0) return
+    const last = Array.from(runs.entries()).pop()
+    last?.[1].abort()
   }
 
-  async function onApproveTool(id: string, decision: 'approve' | 'deny') {
+  /**
+   * 批准 / 拒绝一条挂起的写入。
+   * options.all = 用户点了「批准全部」：后端给这一轮打标记，本轮后续的低 / 中风险写入
+   * 不再逐条挂起等人点；高风险（.env / 密钥 / CI 配置）仍逐条拦。
+   */
+  async function onApproveTool(
+    id: string,
+    decision: 'approve' | 'deny',
+    options?: { all?: boolean },
+  ) {
     const snapshot = new Map<string, ToolCallView['status']>()
     setSessions((prev) =>
       prev.map((s) => ({
@@ -493,7 +666,7 @@ export default function App() {
       })),
     )
     try {
-      const settled = await postChatApprove(id, decision)
+      const settled = await postChatApprove(id, decision, options)
       // 热重载后 SSE 已断：接口直接落盘，用返回结果更新卡片
       if (settled.mode === 'orphan') {
         setSessions((prev) =>
@@ -533,7 +706,7 @@ export default function App() {
             ...m,
             tools: m.tools.map((t) => {
               if (t.id !== id) return t
-              if (/没有这条待批准|超时|已处理/.test(message)) {
+              if (/没有这条待批准|已处理/.test(message)) {
                 return {
                   ...t,
                   status: 'error' as const,
@@ -551,7 +724,7 @@ export default function App() {
 
   const talk = (
     <div className="app__talk">
-      <main className="main">
+      <main className="main" ref={mainRef} onScroll={onMainScroll}>
         {(rag || skills.length > 0 || mcp?.connected || mcp?.error) && (
           <p className="rag-hint">
             {rag && (
@@ -594,7 +767,7 @@ export default function App() {
                   key={q}
                   type="button"
                   className="hint"
-                  disabled={activeBusy}
+                  /* 生成中不再禁用：这时发出去就是「插话」，新的一轮直接开跑 */
                   onClick={() => onSend(q)}
                 >
                   {q}
@@ -605,15 +778,19 @@ export default function App() {
         <form
           className="composer"
           onSubmit={(e) => {
-            e.preventDefault()
-            void onSend()
+            e.preventDefault();
+            void onSend();
           }}
         >
           <textarea
             ref={composerRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="输入问题，Enter 发送，Shift+Enter 换行"
+            placeholder={
+              activeBusy
+                ? '继续输入可以直接发出去（插话），不用等这一轮结束'
+                : '输入问题，Enter 发送，Shift+Enter 换行'
+            }
             rows={2}
             onKeyDown={(e) => {
               /*
@@ -641,17 +818,63 @@ export default function App() {
               void onSend()
             }}
           />
-          {activeBusy ? (
-            <button type="button" className="btn btn--stop" onClick={onStop}>
-              停止
-            </button>
-          ) : (
+          {/*
+           * 生成中「发送」和「停止」并存：原来 busy 时整颗发送键被换成停止键，
+           * 于是没法插话。现在发送始终在，旁边多一颗停止（生成中才出现）。
+           */}
+          <div className="composer__actions">
+            {activeBusy && (
+              <button
+                type="button"
+                className="btn btn--stop"
+                onClick={onStop}
+                title="只打断最新那一条；此前已经开出去的几轮会各自跑完"
+              >
+                停止
+              </button>
+            )}
             <button type="submit" className="btn" disabled={!input.trim()}>
               发送
             </button>
-          )}
+          </div>
+          {/*
+           * 框里的第二行：左边用量环、右边工作区条。
+           * 它们在 <form className="composer"> 内部，和输入区共用同一个圆角外框
+           * （AppShell.css 把白底/边框/圆角从 textarea 提到了 .composer，这一行是 grid-area: foot）。
+           * 注意 WorkspaceBar 里只有 div 和 type="button"，没有 form/input，放进来不会形成嵌套表单。
+           */}
+          <div className="composer-foot">
+            {messages.length > 0 && (
+              <div
+                className={contextWarn ? 'ctx ctx--warn' : 'ctx'}
+                title="与发给后端的 history 同口径：只数角色和正文、单条按 8000 字符截断，不含系统提示词、工具 schema 与 skill 正文，所以是下限；预警线按「窗口 − 预留」判，不是固定百分比"
+              >
+                <svg className="ctx__ring" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle className="ctx__ring-track" cx="12" cy="12" r={RING_RADIUS} />
+                  {/*
+                   * 从 12 点方向开始画（SVG 的 0° 在 3 点方向），顺时针走。
+                   * dasharray 放整圈周长、dashoffset 按比例往后收，就是进度环。
+                   */}
+                  <circle
+                    className="ctx__ring-fill"
+                    cx="12"
+                    cy="12"
+                    r={RING_RADIUS}
+                    transform="rotate(-90 12 12)"
+                    strokeDasharray={RING_CIRCUMFERENCE}
+                    strokeDashoffset={RING_CIRCUMFERENCE * (1 - contextRatio)}
+                  />
+                </svg>
+                <span className="ctx__text">
+                  {formatTokens(contextUsed)} / {formatTokens(windowTokens)}
+                  <span className="ctx__mode">下限</span>
+                </span>
+                {contextWarn && <span className="ctx__hint">接近上限，建议开新会话</span>}
+              </div>
+            )}
+            <WorkspaceBar />
+          </div>
         </form>
-        <WorkspaceBar />
       </footer>
     </div>
   )
@@ -681,6 +904,18 @@ export default function App() {
               onDelete={removeSession}
             />
             {talk}
+            {/*
+             * 会话内提问目录：点一下直接跳到那条提问（瞬时定位，无过场动画）。
+             * onJump 先关掉「自动贴底」——否则这一轮还在流式时，下一个 delta 会
+             * 立刻把视图拽回底部，看起来像「点了没反应」。
+             */}
+            <ChatOutline
+              messages={messages}
+              containerRef={mainRef}
+              onJump={() => {
+                stickBottom.current = false
+              }}
+            />
           </div>
         )}
         {page === 'documents' && <DocumentsPage />}
@@ -694,6 +929,12 @@ export default function App() {
             onSaved={(next) => {
               setMode(next.mode)
               setModel(next.model)
+              /*
+               * 配置页保存后的窗口大小要立刻生效。
+               * 挂载时那次 fetchHealth 的依赖是 []，而 App 是根组件、切 hash 不会重新挂载，
+               * 所以不在这里更新的话：改完上下文窗口回对话页，分母一直是旧值（只有整页刷新才对）。
+               */
+              setWindowTokens(next.contextWindow)
             }}
             onMcpSaved={(next) => setMcp(next)}
           />

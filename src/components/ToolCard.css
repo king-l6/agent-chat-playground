@@ -163,11 +163,13 @@
 
 .tool-card__actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.45rem;
   margin-top: 0.55rem;
 }
 
 .tool-card__ok,
+.tool-card__all,
 .tool-card__no {
   border: 0;
   border-radius: 8px;
@@ -183,19 +185,50 @@
   color: #fff;
 }
 
+/* 「批准全部」是批量入口，样式压得比单条批准轻一点，避免误当默认操作点 */
+.tool-card__all {
+  background: #dcfce7;
+  color: #166534;
+  box-shadow: inset 0 0 0 1px #86efac;
+}
+
 .tool-card__no {
   background: #fee2e2;
   color: #991b1b;
 }
 
 .tool-card__ok:disabled,
+.tool-card__all:disabled,
 .tool-card__no:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
 
-.tool-card__deadline {
-  margin: 0.35rem 0 0;
+.tool-card__note {
+  margin: 0.4rem 0 0;
   font-size: 0.75rem;
   color: #9a3412;
+}
+
+.tool-card__risk {
+  margin: 0.4rem 0 0;
+  font-size: 0.78rem;
+  font-weight: 650;
+  padding: 0.28rem 0.5rem;
+  border-radius: 8px;
+}
+
+.tool-card__risk--low {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.tool-card__risk--medium {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.tool-card__risk--high {
+  background: #fef2f2;
+  color: #b91c1c;
 }

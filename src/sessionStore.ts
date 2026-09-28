@@ -8,6 +8,14 @@ const KEY = 'agentos.sessions.v1'
 export type ChatSession = {
   id: string
   title: string
+  /**
+   * 最后一次「用户提问」的时间。
+   * 左侧列表的排序 / 今天-昨天分组 / 列表里的日期都只认这个字段。
+   * 坑：不要拿流式回调（text_delta / tool_* / step）去写它——多个会话同时生成时，
+   * 每来一个 token 就换一次排序键，列表会上下反复换位。
+   */
+  lastUserAt: number
+  /** 最后一次活动时间（含流式 token 与工具事件）。只用于「最近动过」这类展示，不参与排序。 */
   updatedAt: number
   messages: UiMessage[]
 }
@@ -17,7 +25,8 @@ export function uid() {
 }
 
 export function blankSession(): ChatSession {
-  return { id: uid(), title: '新对话', updatedAt: Date.now(), messages: [] }
+  const now = Date.now()
+  return { id: uid(), title: '新对话', lastUserAt: now, updatedAt: now, messages: [] }
 }
 
 export function sessionTitle(messages: UiMessage[]) {
@@ -36,10 +45,13 @@ function revive(raw: unknown): ChatSession | null {
       ? { ...m, status: 'done' as const, content: m.content || '（已中断）' }
       : m,
   )
+  const updatedAt = typeof row.updatedAt === 'number' ? row.updatedAt : Date.now()
   return {
     id: row.id,
     title: typeof row.title === 'string' && row.title ? row.title : sessionTitle(messages),
-    updatedAt: typeof row.updatedAt === 'number' ? row.updatedAt : Date.now(),
+    // 老数据没有 lastUserAt：回退到 updatedAt，至少保证排序键存在且稳定
+    lastUserAt: typeof row.lastUserAt === 'number' ? row.lastUserAt : updatedAt,
+    updatedAt,
     messages,
   }
 }

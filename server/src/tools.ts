@@ -2,6 +2,11 @@
  * 本地工具定义 + 执行
  * - toolDefinitions：告诉模型「有哪些工具、参数长什么样」（OpenAI tools schema）
  * - executeTool：服务端真正跑工具，返回 JSON 字符串
+ *
+ * 注意 ask_user（「需要你拍板」）不在 toolDefinitions 里，它是**代码团队专属**的人机停点：
+ * 答案必须由人在界面上填，本地执行语义（立刻返回字符串）装不下「等人」。
+ * 真实挂起点在 codeTeam.ts 的 runOneTool（发 ask 事件 → await waitForAnswer → 回填 tool 结果）。
+ * 这样默认对话模式 / MCP 的工具集和以前一模一样，不会平白多出一个会卡住的工具。
  */
 import type { ChatCompletionTool } from 'openai/resources/chat/completions'
 // 引用 RAG：retrieve.ts 负责向量/关键词，这里只做工具入口 + JSON
@@ -14,6 +19,39 @@ import { callMcpTool, isMcpTool, mcpToolDefinitions } from './mcp.js'
 /** 本地工具 + 已连接 MCP。对话循环用这个，不要只用下面的静态表。 */
 export function getToolDefinitions(): ChatCompletionTool[] {
   return [...toolDefinitions, ...mcpToolDefinitions()]
+}
+
+/**
+ * ask_user 的工具 schema（代码团队专用，见文件头注释）。
+ *
+ * 描述里必须写清「什么时候该问、什么时候别问」，否则模型要么从不调用（
+ * 于是又变成在回答里写「需要你拍板」这种不会真的停下来的文字），
+ * 要么每件小事都来问一遍。
+ */
+export const askUserToolDefinition: ChatCompletionTool = {
+  type: 'function',
+  function: {
+    name: 'ask_user',
+    description:
+      '把决定权交给用户：你缺关键信息、或存在两个都说得通的方案而取舍取决于用户口味/业务约束时调用。调用后本轮会**真的停下**，界面上出现提问卡片，用户回答后你才继续。禁止在回答正文里写「需要你拍板 / 请你确认」却不调用这个工具——那不会停下来，等于自己替用户拍板。不要用来问能自己读文件搞清的事（例如文件里写了什么、代码怎么组织），也不要在可以按最小改动先做一版时调用。一次只问一个决策点，问题要短，能给出候选就把 options 填上。',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: {
+          type: 'string',
+          description: '要用户拍板的那个问题，一句话，中文，具体到「选 A 还是 B」这一级',
+        },
+        options: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            '可选：2~4 个候选答案，用户点一下就回你。留空则用户自由输入。候选项要写成完整可执行的答复（例如「按方案 A 改，只动 App.tsx」）。',
+        },
+      },
+      required: ['question'],
+      additionalProperties: false,
+    },
+  },
 }
 
 /** 交给大模型的工具清单（function calling schema） */
@@ -365,6 +403,25 @@ export async function executeTool(
       if (count > 10) throw new Error('掷骰子次数不能超过 10');
       const result = Math.floor(Math.random() * sides) + 1;
       return JSON.stringify({ sides, count, result });
+    }
+    case 'ask_user': {
+      /*
+       * 到这说明有人跳过了人机通道直接执行它。只有 codeTeam.runOneTool 知道怎么
+       * 「停下等界面上的回答」，别的链路（默认模式 / MCP 同名）没有回答入口。
+       * 这里如实回一条结构化错误，让模型改说「我无法在没有人机通道的情况下获得回答」，
+       * 绝不能让这里返回一段编造的答案（那比报错更糟：模型会当真）。
+       */
+      const question = String(args.question ?? '').trim()
+      return JSON.stringify(
+        {
+          error:
+            'ask_user 需要人机通道（代码团队模式会弹提问卡片）。当前上下文没有回答入口，这一问没有得到任何用户答复。',
+          answered: false,
+          question,
+        },
+        null,
+        2,
+      )
     }
     default:
       if (isMcpTool(name)) {

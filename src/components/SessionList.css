@@ -1,0 +1,63 @@
+/*
+ * 会话列表的补充样式（SessionList.tsx）：搜索框 + 日期分组 + 独立滚动容器。
+ * 放在单独文件里、不和 AppShell.css 混，是因为这段只在会话页用。
+ *
+ * 覆盖 .sessions__list 的 overflow 时特意写成 `.sessions .sessions__list`
+ * （比 AppShell.css 里的 .sessions__list 多一个类，特异性更高）：
+ * AppShell.css 在 App.tsx 里是最后 import 的，同特异性规则会被它压回去。
+ */
+.sessions .sessions__search {
+  flex-shrink: 0;
+  margin-top: 0.55rem;
+  width: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: 0.78rem;
+  background: #fff;
+  color: #0f172a;
+  outline: none;
+}
+
+.sessions .sessions__search:focus {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+}
+
+/* 真正滚动的是这一层：里面按分组堆多个 ul，不能再让每个 ul 各自滚 */
+.sessions .sessions__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin-top: 0.35rem;
+}
+
+.sessions .sessions__group + .sessions__group {
+  margin-top: 0.6rem;
+}
+
+.sessions__group-label {
+  margin: 0.45rem 0 0.15rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #94a3b8;
+}
+
+.sessions .sessions__list {
+  overflow: visible;
+  margin: 0;
+}
+
+.sessions__none {
+  margin: 0.75rem 0.5rem;
+  font-size: 0.78rem;
+  color: #94a3b8;
+}
+
+@media (max-width: 900px) {
+  .sessions .sessions__search {
+    display: none;
+  }
+}

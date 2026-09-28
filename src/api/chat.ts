@@ -14,11 +14,13 @@ const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '';
  * @param messages 发给后端的精简历史（只有 role + content）
  * @param signal   AbortController.signal，点「停止」时 abort 会中断请求
  * @param onEvent  每收到一个 SseEvent 回调一次（交给 App.handleEvent）
+ * @param autoApprove 代码团队专用：写入不再逐条挂起等人点（高风险文件仍会拦）
  */
 export async function streamChat(options: {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   mode?: 'default' | 'code_team';
   signal?: AbortSignal;
+  autoApprove?: boolean;
   onEvent: (event: SseEvent) => void;
 }) {
   // 1) 用 axios 的 fetch adapter + stream，才能在浏览器里边收边解析 SSE
@@ -26,12 +28,18 @@ export async function streamChat(options: {
   try {
     const res = await axios.post(
       `${API_BASE}/api/chat`,
-      { messages: options.messages, mode: options.mode ?? 'default' },
+      {
+        messages: options.messages,
+        mode: options.mode ?? 'default',
+        autoApprove: options.autoApprove === true,
+      },
       {
         adapter: 'fetch',
         responseType: 'stream',
         headers: { 'Content-Type': 'application/json' },
         signal: options.signal,
+        // 代码团队可能挂起等人批准，别让 axios 默认超时掐断
+        timeout: 0,
       },
     );
 
@@ -49,7 +57,12 @@ export async function streamChat(options: {
       } else if (data instanceof ReadableStream) {
         text = await new Response(data).text().catch(() => '');
       }
-      throw new Error(text || `请求失败 HTTP ${err.response?.status ?? ''}`);
+      const msg =
+        text ||
+        (err.code === 'ERR_NETWORK' || /network error/i.test(err.message)
+          ? '连接中断。若回答已经出完，可以忽略；否则请重发。'
+          : `请求失败 HTTP ${err.response?.status ?? ''}`);
+      throw new Error(msg);
     }
     throw err;
   }
@@ -62,35 +75,69 @@ export async function streamChat(options: {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = ''; // 跨 chunk 拼接：上次没收完的半截事件先留着
+  let sawDone = false;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break; // 流结束
-    buffer += decoder.decode(value, { stream: true });
-    // SSE 约定：事件之间用空行分隔（\n\n）
-    const chunks = buffer.split('\n\n');
-    // pop 出最后一段：可能还不完整，下次继续拼
-    buffer = chunks.pop() ?? '';
-    for (const chunk of chunks) {
-      // 一个事件里可能有多行，我们只要以 data: 开头的那行
-      const line = chunk
-        .split('\n')
-        .map((l) => l.trim())
-        .find((l) => l.startsWith('data:'));
-      if (!line) continue;
-      // 去掉 "data:" 前缀，剩下就是 JSON 字符串
-      const payload = line.slice(5).trim();
-      if (!payload) continue;
+  try {
+    while (true) {
+      let chunk: ReadableStreamReadResult<Uint8Array>;
       try {
-        options.onEvent(JSON.parse(payload) as SseEvent);
-      } catch {
-        // 某包解析失败就跳过，避免整轮崩掉
+        chunk = await reader.read();
+      } catch (err) {
+        // 长 SSE 收尾时代理/浏览器常抛 NetworkError；已经 done 就不当失败
+        if (sawDone) return;
+        if (options.signal?.aborted) {
+          throw new DOMException('Aborted', 'AbortError');
+        }
+        const raw = err instanceof Error ? err.message : String(err);
+        if (/network|fetch|aborted|reset|closed/i.test(raw)) {
+          throw new Error('连接中断。若回答已经出完，可以忽略；否则请重发。');
+        }
+        throw err instanceof Error ? err : new Error(raw);
       }
+      const { done, value } = chunk;
+      if (done) break; // 流结束
+      buffer += decoder.decode(value, { stream: true });
+      // SSE 约定：事件之间用空行分隔（\n\n）
+      const chunks = buffer.split('\n\n');
+      // pop 出最后一段：可能还不完整，下次继续拼
+      buffer = chunks.pop() ?? '';
+      for (const piece of chunks) {
+        // 一个事件里可能有多行，我们只要以 data: 开头的那行
+        const line = piece
+          .split('\n')
+          .map((l) => l.trim())
+          .find((l) => l.startsWith('data:'));
+        if (!line) continue;
+        // 去掉 "data:" 前缀，剩下就是 JSON 字符串
+        const payload = line.slice(5).trim();
+        if (!payload) continue;
+        try {
+          const event = JSON.parse(payload) as SseEvent;
+          if (event.type === 'done') sawDone = true;
+          options.onEvent(event);
+        } catch {
+          // 某包解析失败就跳过，避免整轮崩掉
+        }
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* ignore */
     }
   }
 }
 
-export async function postChatApprove(id: string, decision: 'approve' | 'deny') {
+/**
+ * 批准 / 拒绝一条挂起的 workspace_write
+ * @param all 传 true 表示「全部批准」：这一轮后续的低/中风险写入不再逐条问
+ */
+export async function postChatApprove(
+  id: string,
+  decision: 'approve' | 'deny',
+  options?: { all?: boolean },
+) {
   try {
     const { data } = await axios.post<{
       ok: true
@@ -98,7 +145,30 @@ export async function postChatApprove(id: string, decision: 'approve' | 'deny') 
       decision?: 'approve' | 'deny'
       result?: string
       error?: string
-    }>(`${API_BASE}/api/chat/approve`, { id, decision })
+    }>(`${API_BASE}/api/chat/approve`, { id, decision, all: options?.all === true })
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+/**
+ * 回答一条挂起的 ask_user（代码团队「需要你拍板」）
+ *
+ * 和批准写入不同，答案不落盘：磁盘记录的意义是「热重载后还能按原参数落盘」，
+ * 而回答只对当前那一轮 SSE 的模型循环有意义——那一轮已经断了的话，答案也没人收。
+ */
+export async function postChatAnswer(id: string, answer: string) {
+  try {
+    const { data } = await axios.post<{
+      ok: true
+      mode: 'live'
+      id: string
+    }>(`${API_BASE}/api/chat/answer`, { id, answer })
     return data
   } catch (err) {
     if (axios.isAxiosError(err)) {
@@ -219,6 +289,16 @@ export type LlmSettingsPublic = {
   hasKey: boolean
   baseURL: string
   model: string
+  /**
+   * 上下文窗口（token）＝对话页用量环的分母。
+   *
+   * 后端 /api/settings 与 /api/health 都会带这个字段，值是 server/src/settings.ts
+   * 的 resolveContextWindow() 按「面板 llm.json → 环境变量 → 32k 兜底」算好的结果。
+   * 前端不要自己再猜一个数，也不要按模型名查表（模型名是自由文本，没有可靠映射）。
+   *
+   * 注意「不传」和「传 0」在后端是两种语义，见 saveSettings。
+   */
+  contextWindow: number
 }
 
 export type McpPublic = {
@@ -240,6 +320,12 @@ export async function saveSettings(body: {
   apiKey?: string
   baseURL?: string
   model?: string
+  /**
+   * 上下文窗口。**省略这个字段 = 不动它**；传 0 或非法值 = 清掉面板里的值，
+   * 回落环境变量 / 32k 兜底。所以「用户没碰这个输入框」时要整个字段都不带，
+   * 否则每次保存都会把环境变量来的值写死进 llm.json（见 SettingsPage 的 windowTouched）。
+   */
+  contextWindow?: number
 }) {
   try {
     const { data } = await axios.put<LlmSettingsPublic>(`${API_BASE}/api/settings`, body)
@@ -289,6 +375,8 @@ export async function fetchHealth() {
     ok: boolean
     mode: string
     model?: string
+    /** 用量环的分母，后端算好的（见 LlmSettingsPublic.contextWindow） */
+    contextWindow?: number
     rag?: RagStatus
     skills?: SkillMeta[]
     mcp?: McpPublic

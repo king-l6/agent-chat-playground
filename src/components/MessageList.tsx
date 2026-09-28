@@ -4,7 +4,7 @@
 import { useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { AgentRole, ToolCallView, UiMessage } from '../types'
+import type { AgentRole, ToolApproveHandler, ToolCallView, UiMessage } from '../types'
 import {
   groupCitationsByDoc,
   parseCitationHitsFromTools,
@@ -16,17 +16,30 @@ import { ChatImage } from './ChatImage'
 import { ToolCard } from './ToolCard'
 import './MessageList.css'
 
+/**
+ * 角色名 → 中文短标签。
+ * 名单必须覆盖 src/types.ts 的 AgentRole 全集：漏掉一个，正文里就会掉出
+ * 英文小条（原来 summary 没写，页面上直接显示「summary · 完成」）。
+ */
 function roleLabel(role: AgentRole) {
   if (role === 'explore') return '探索'
   if (role === 'implement') return '改码'
   if (role === 'review') return '评审'
+  if (role === 'summary') return '总结'
   if (role === 'pm') return '产品'
   if (role === 'dev') return '研发'
   if (role === 'qa') return '测试'
   return role
 }
 
-const TEAM_ROLES: AgentRole[] = ['explore', 'implement', 'review']
+/**
+ * 代码团队在气泡顶部画进度格的角色顺序。
+ *
+ * 后端 codeTeam.ts 的 stages 是 explore → implement → review → summary **四段**，
+ * 这里少写一个就会「跑完了但进度条上没这一格」——之前 summary 不在名单里，
+ * 用户的体感正是「改完之后没有总结」。加角色时两边一起改。
+ */
+const TEAM_ROLES: AgentRole[] = ['explore', 'implement', 'review', 'summary']
 
 function teamPipeline(parts: UiMessage['parts']) {
   const state = new Map<AgentRole, 'pending' | 'active' | 'done'>()
@@ -47,10 +60,7 @@ function TeamStrip({ message }: { message: UiMessage }) {
       {pipe.map((item, i) => (
         <li key={item.role} className={`msg__team-item msg__team-item--${item.status}`}>
           {i > 0 && <span className="msg__team-arrow" aria-hidden>→</span>}
-          <span>
-            {item.status === 'done' ? '✓ ' : item.status === 'active' ? '● ' : '○ '}
-            {roleLabel(item.role)}
-          </span>
+          {roleLabel(item.role)}
         </li>
       ))}
     </ol>
@@ -75,7 +85,7 @@ function StepBlocks({
 }: {
   tools: ToolCallView[]
   cited: Set<number> | null
-  onApprove?: (id: string, decision: 'approve' | 'deny') => void | Promise<void>
+  onApprove?: ToolApproveHandler
 }) {
   const groups = groupSteps(tools)
   return (
@@ -103,7 +113,7 @@ function MessageProcess({
   tools: ToolCallView[]
   streaming: boolean
   cited: Set<number> | null
-  onApprove?: (id: string, decision: 'approve' | 'deny') => void | Promise<void>
+  onApprove?: ToolApproveHandler
 }) {
   if (!tools.length) return null
   const running =
@@ -281,7 +291,7 @@ function AssistantBody({
   onApprove,
 }: {
   message: UiMessage
-  onApprove?: (id: string, decision: 'approve' | 'deny') => void | Promise<void>
+  onApprove?: ToolApproveHandler
 }) {
   const streaming = message.status === 'streaming'
   const cited = streaming ? null : citationNumbers(message.content)
@@ -314,14 +324,9 @@ function AssistantBody({
           )
         }
         if (run.kind === 'reasoning') {
-          return streaming && last ? (
-            <div key={index} className="msg__reason">
-              <p className="msg__process-head">思考</p>
-              <div>{run.text}</div>
-            </div>
-          ) : (
+          return (
             <details key={index} className="msg__reason">
-              <summary>思考</summary>
+              <summary>{streaming && last ? '思考中…' : '思考'}</summary>
               <div>{run.text}</div>
             </details>
           )
@@ -357,7 +362,7 @@ export function MessageList({
   codeTeam = false,
 }: {
   messages: UiMessage[]
-  onApprove?: (id: string, decision: 'approve' | 'deny') => void | Promise<void>
+  onApprove?: ToolApproveHandler
   codeTeam?: boolean
 }) {
   // 还没聊过：显示空状态引导
@@ -367,7 +372,7 @@ export function MessageList({
         <h2>{codeTeam ? '代码团队' : 'Agent Chat Playground'}</h2>
         <p>
           {codeTeam
-            ? '探索 → 改码 → 评审。写文件前会停住等人批准（对齐 OpenHands / OMA）。先连底部工作区。'
+            ? '探索 → 改码 → 评审 → 总结。写文件前会停住等人批准（对齐 OpenHands / OMA）。先连底部工作区。'
             : '流式对话 + 工具卡片 + 已连接 Skill。无 API Key 也能用 mock 演示。'}
         </p>
         <ul>
@@ -392,7 +397,8 @@ export function MessageList({
   return (
     <div className="message-list">
       {messages.map((m) => (
-        <article key={m.id} className={`msg msg--${m.role}`}>
+        /* data-msg-id 是右侧「提问目录」（ChatOutline）的跳转锚点，改名要同步那边 */
+        <article key={m.id} data-msg-id={m.id} className={`msg msg--${m.role}`}>
           {/* 角色标签 */}
           <div className="msg__role">
             {m.role === 'user' ? '你' : codeTeam || teamPipeline(m.parts).some((p) => p.status !== 'pending') ? '代码团队' : '助手'}

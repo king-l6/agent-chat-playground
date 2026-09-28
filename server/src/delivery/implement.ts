@@ -87,14 +87,6 @@ function normNl(text: string) {
   return text.replace(/\r\n/g, '\n')
 }
 
-function looksFullFile(rel: string, body: string) {
-  const t = body.trim()
-  if (t.length < 20) return false
-  if (rel.endsWith('.json')) return t.startsWith('{') || t.startsWith('[')
-  if (/^(import |export |const |function |type |interface |class |\/\*|\/\/|<!|#)/.test(t)) return true
-  return t.split('\n').length >= 8
-}
-
 function flexReplace(current: string, old: string, next: string) {
   const cur = normNl(current)
   const search = normNl(old)
@@ -135,7 +127,8 @@ function applyEdit(rel: string, oldString: string, newString: string) {
     workspaceWrite(path, swapped)
     return path
   }
-  if (looksFullFile(path, next)) {
+  // SEARCH 对不上时：有 REPLACE 正文就整文件覆盖，避免 Delivery 死循环「对不上 SEARCH」
+  if (next.trim()) {
     workspaceWrite(path, next)
     return path
   }

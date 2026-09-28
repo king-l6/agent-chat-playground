@@ -1,0 +1,86 @@
+/*
+ * 会话内提问目录：挂在聊天区右侧，宽度固定、自己滚动。
+ * 观感对齐 DeepSeek 的会话列表：白底、无边框，条目是圆角灰块，一行一条，
+ * 悬停显示完整提问（button 的 title）。
+ * 外层 .app__chat 用 grid-template-columns: … auto（见 AppShell.css），
+ * 组件返回 null 时这一列宽度会塌成 0，不需要再加条件类名。
+ */
+.outline {
+  width: 208px;
+  min-height: 0;
+  overflow: auto;
+  border-left: 1px solid #ececf1;
+  background: #fff;
+  padding: 0.9rem 0.5rem 1.25rem;
+}
+
+/*
+ * 跳转是瞬时定位（scrollIntoView({ block: 'start' })，不含 behavior: smooth），
+ * 留一点上边距免得标题贴着滚动容器顶。
+ */
+.msg[data-msg-id] {
+  scroll-margin-top: 1rem;
+}
+
+.outline__title {
+  margin: 0 0 0.4rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #9aa0aa;
+}
+
+.outline__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.outline__item {
+  width: 100%;
+  display: block;
+  text-align: left;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #2b2f36;
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  padding: 0.42rem 0.5rem;
+  cursor: pointer;
+}
+
+.outline__item:hover {
+  background: #f4f5f7;
+  color: #0f172a;
+}
+
+.outline__item--on {
+  background: #eceef1;
+  color: #0f172a;
+  font-weight: 600;
+}
+
+/* 单行省略：一条只占一行，悬停看完整（button 的 title） */
+.outline__text {
+  display: block;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * 窗口不够宽时先让掉目录，聊天正文优先。
+ * 这个断点必须比 AppShell.css 里 .app__chat 的 900px 更早生效：
+ * 1180 起目录消失（display:none 不占列），到 900 时再由那边把会话列表收窄。
+ */
+@media (max-width: 1180px) {
+  .outline {
+    display: none;
+  }
+}

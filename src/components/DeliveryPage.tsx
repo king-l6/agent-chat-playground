@@ -11,6 +11,7 @@ import {
   type TalkTrace,
 } from '../api/delivery'
 import type { ToolCallView } from '../types'
+import { UnifiedDiff } from './CodeDiff'
 import './DeliveryPage.css'
 
 function stepTitle(name: string) {
@@ -225,7 +226,10 @@ export function DeliveryPage() {
   }, [reload])
 
   useEffect(() => {
-    threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: 'smooth' })
+    const el = threadRef.current
+    if (!el) return
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (gap < 100) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }, [run?.talk?.length, busy, steps.length])
 
   useEffect(() => {
@@ -496,20 +500,22 @@ export function DeliveryPage() {
       )}
       {dev && run.lastErrors && run.lastErrors.length > 0 && (
         <div className="work__fails">
-          <strong>还没写成</strong>
-          {run.lastErrors.map((err) => (
-            <p key={err}>{err}</p>
-          ))}
+          <strong>还没写成 · {run.lastErrors.length}</strong>
+          <ul>
+            {run.lastErrors.map((err) => (
+              <li key={err}>{err}</li>
+            ))}
+          </ul>
         </div>
       )}
       {diff ? (
-        <details className="desk__diff" open>
-          <summary>文件变更{diff.length > 8000 ? ' · 已截断' : ''}</summary>
-          <pre>{diff.slice(0, 8000)}</pre>
-          {diff.length > 8000 ? (
-            <p className="desk__muted">全文 {diff.length} 字，这里只展示前 8000。</p>
-          ) : null}
-        </details>
+        <div className="desk__diff-panel">
+          <div className="desk__diff-head">
+            文件变更
+            {diff.length > 8000 ? <span> · 预览截断</span> : null}
+          </div>
+          <UnifiedDiff text={diff.slice(0, 8000)} height={360} />
+        </div>
       ) : null}
       {run.review?.comments.map((c) => (
         <p key={c.path}>

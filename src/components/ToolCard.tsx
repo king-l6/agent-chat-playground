@@ -2,15 +2,25 @@
  * 单张 Tool Calling 卡片。
  * 先给能读的摘要（检索轨迹、算式、Skill 名），原始 JSON 收在折叠里。
  * 代码团队的 workspace_write 会停在 awaiting_approval，对齐 OpenHands 确认卡。
+ *
+ * 三个刻意为之的点：
+ * 1. 没有「倒计时 / 自动拒绝」。后端把人点批准当成可以无限等的事
+ *    （server/src/codeTeam.ts 的 waitForApproval 里根本没有计时器，注释也写明
+ *    「批准不会过期」）；唯一会结束挂起的是用户自己点、或这一轮 SSE 断开。
+ *    界面以前显示「5:00 后自动拒绝」，那是旧超时逻辑的残留，已经删掉。
+ * 2. 「批准全部」= 本轮后续的低 / 中风险写入不再逐条停下来问（后端 canAutoApprove）。
+ * 3. 高风险文件（.env / 密钥 / CI 配置）不给「批准全部」这个按钮：
+ *    writeRisk() 把它们判成 high，后端也会单独拦，这里就不要给一刀切的入口。
  */
 import { useEffect, useState } from 'react'
-import type { ToolCallView } from '../types'
+import type { ToolCallView, ToolApproveHandler } from '../types'
 import {
   formatScore,
   retrievalLabel,
   summarizeTool,
   type SearchHitView,
 } from '../lib/toolView'
+import { SideBySideDiff } from './CodeDiff'
 import './ToolCard.css'
 
 function statusText(tool: ToolCallView, skill: boolean) {
@@ -128,14 +138,6 @@ function formatJson(raw: string) {
   }
 }
 
-function formatRemain(ms: number) {
-  if (ms <= 0) return '即将超时'
-  const sec = Math.ceil(ms / 1000)
-  const m = Math.floor(sec / 60)
-  const s = sec % 60
-  return m > 0 ? `${m}:${String(s).padStart(2, '0')} 后自动拒绝` : `${s}s 后自动拒绝`
-}
-
 export function ToolCard({
   tool,
   cited = null,
@@ -143,7 +145,7 @@ export function ToolCard({
 }: {
   tool: ToolCallView
   cited?: Set<number> | null
-  onApprove?: (id: string, decision: 'approve' | 'deny') => void | Promise<void>
+  onApprove?: ToolApproveHandler
 }) {
   const skill = tool.name === 'load_skill'
   const skillName = skill ? summarizeTool(tool) : null
@@ -156,30 +158,17 @@ export function ToolCard({
   const raw = tool.status === 'done' ? rawPayload(tool) : formatJson(tool.arguments || '')
   const waiting = tool.status === 'awaiting_approval'
   const [busy, setBusy] = useState(false)
-  const [remain, setRemain] = useState(() =>
-    tool.expiresAt ? Math.max(0, tool.expiresAt - Date.now()) : null,
-  )
-
-  useEffect(() => {
-    if (!waiting || tool.expiresAt == null) {
-      setRemain(null)
-      return
-    }
-    const tick = () => setRemain(Math.max(0, (tool.expiresAt ?? 0) - Date.now()))
-    tick()
-    const id = window.setInterval(tick, 1000)
-    return () => window.clearInterval(id)
-  }, [waiting, tool.expiresAt])
 
   useEffect(() => {
     if (!waiting) setBusy(false)
   }, [waiting, tool.status])
 
-  async function decide(decision: 'approve' | 'deny') {
+  /** all = 点的是「批准全部」：本轮后续低/中风险写入一起放行 */
+  async function decide(decision: 'approve' | 'deny', all = false) {
     if (!onApprove || busy) return
     setBusy(true)
     try {
-      await onApprove(tool.id, decision)
+      await onApprove(tool.id, decision, all ? { all: true } : undefined)
     } finally {
       // 成功会变成 running/done；失败 App 会回滚 awaiting，这里放开按钮
       setBusy(false)
@@ -193,14 +182,24 @@ export function ToolCard({
         <span className="tool-card__status">{statusText(tool, skill)}</span>
       </div>
       <Summary tool={tool} cited={cited} />
-      {waiting && tool.preview && (
+      {waiting && tool.risk && (
+        <p className={`tool-card__risk tool-card__risk--${tool.risk}`}>
+          风险 {tool.risk === 'high' ? '高' : tool.risk === 'medium' ? '中' : '低'}
+          {tool.riskReason ? ` · ${tool.riskReason}` : ''}
+        </p>
+      )}
+      {waiting && (tool.after != null || tool.before != null) ? (
+        <SideBySideDiff
+          path={tool.path}
+          before={tool.before ?? ''}
+          after={tool.after ?? ''}
+          height={260}
+        />
+      ) : waiting && tool.preview ? (
         <pre className="tool-card__preview">
           <code>{tool.preview}</code>
         </pre>
-      )}
-      {waiting && remain != null && (
-        <p className="tool-card__deadline">{formatRemain(remain)}</p>
-      )}
+      ) : null}
       {waiting && onApprove && (
         <div className="tool-card__actions">
           <button
@@ -211,6 +210,17 @@ export function ToolCard({
           >
             {busy ? '提交中…' : '批准写入'}
           </button>
+          {tool.risk !== 'high' && (
+            <button
+              type="button"
+              className="tool-card__all"
+              disabled={busy}
+              title="本轮之后低 / 中风险的写入不再逐条询问；高风险文件仍会单独停下来问你"
+              onClick={() => void decide('approve', true)}
+            >
+              批准全部
+            </button>
+          )}
           <button
             type="button"
             className="tool-card__no"
@@ -220,6 +230,11 @@ export function ToolCard({
             拒绝
           </button>
         </div>
+      )}
+      {waiting && tool.risk === 'high' && (
+        <p className="tool-card__note">
+          高风险文件（.env / 密钥 / CI 配置）不支持「批准全部」，请单独确认这一条。
+        </p>
       )}
       {tool.error && <div className="tool-card__error">{tool.error}</div>}
       {raw.trim() && !waiting && (
