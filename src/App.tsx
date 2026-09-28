@@ -3,7 +3,7 @@
  * 聊天页按会话存 messages，SSE 写回对应会话，互不覆盖
  */
 import { useEffect, useRef, useState } from 'react';
-import { streamChat, toApiMessages, fetchHealth, type RagStatus, type SkillMeta, type McpPublic } from './api/chat';
+import { streamChat, toApiMessages, fetchHealth, postChatApprove, type RagStatus, type SkillMeta, type McpPublic } from './api/chat';
 import type { SseEvent, UiMessage, MessagePart } from './types';
 import { MessageList } from './components/MessageList';
 import { DocumentsPage } from './components/DocumentsPage';
@@ -41,6 +41,7 @@ function appendPart(parts: MessagePart[] | undefined, incoming: MessagePart): Me
   if (
     last &&
     incoming.type !== 'tool' &&
+    incoming.type !== 'role' &&
     last.type === incoming.type
   ) {
     next[next.length - 1] = { type: last.type, text: last.text + incoming.text }
@@ -82,6 +83,7 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('agentos.rail') === '1');
   /** 顶部/底部错误条 */
   const [error, setError] = useState<string>('');
+  const [codeTeam, setCodeTeam] = useState(() => localStorage.getItem('agentos.codeTeam') === '1');
   /** 每个会话一份 AbortController，停止只打断当前这条 */
   const abortMap = useRef(new Map<string, AbortController>());
   /** 锚点：当前会话有新消息就滚到底部 */
@@ -102,6 +104,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('agentos.rail', collapsed ? '1' : '0')
   }, [collapsed])
+
+  useEffect(() => {
+    localStorage.setItem('agentos.codeTeam', codeTeam ? '1' : '0')
+  }, [codeTeam])
 
   useEffect(() => {
     if (!sessions.some((s) => s.id === activeId) && sessions[0]) {
@@ -291,6 +297,35 @@ export default function App() {
       });
       return;
     }
+    if (event.type === 'tool_approval') {
+      patchAssistant(sessionId, assistantId, (m) => {
+        const base = withTtft(m)
+        const parts = base.parts ?? []
+        const known = parts.some((part) => part.type === 'tool' && part.id === event.id)
+        const nextTool = {
+          id: event.id,
+          name: event.name,
+          arguments: event.arguments,
+          status: 'awaiting_approval' as const,
+          preview: event.preview,
+          step: base.step ?? 1,
+          startedAt: Date.now(),
+        }
+        return {
+          ...base,
+          parts: known ? parts : [...parts, { type: 'tool' as const, id: event.id }],
+          tools: [...base.tools.filter((t) => t.id !== event.id), nextTool],
+        }
+      })
+      return
+    }
+    if (event.type === 'role_start' || event.type === 'role_done') {
+      patchAssistant(sessionId, assistantId, (m) => ({
+        ...m,
+        parts: [...(m.parts ?? []), { type: 'role' as const, role: event.role, phase: event.type === 'role_start' ? 'start' as const : 'done' as const }],
+      }))
+      return
+    }
     if (event.type === 'error') {
       setError(event.message);
       patchAssistant(sessionId, assistantId, (m) => ({ ...m, status: 'error' }));
@@ -397,6 +432,7 @@ export default function App() {
     try {
       await streamChat({
         messages: toApiMessages([...prior, userMsg]),
+        mode: codeTeam ? 'code_team' : 'default',
         signal: controller.signal,
         onEvent: (event) => handleEvent(sessionId, assistantId, event),
       });
@@ -440,6 +476,25 @@ export default function App() {
     if (active) abortMap.current.get(active.id)?.abort();
   }
 
+  async function onApproveTool(id: string, decision: 'approve' | 'deny') {
+    setSessions((prev) =>
+      prev.map((s) => ({
+        ...s,
+        messages: s.messages.map((m) => ({
+          ...m,
+          tools: m.tools.map((t) =>
+            t.id === id && t.status === 'awaiting_approval' ? { ...t, status: 'running' as const } : t,
+          ),
+        })),
+      })),
+    )
+    try {
+      await postChatApprove(id, decision)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   const talk = (
     <div className="app__talk">
       <main className="main">
@@ -461,7 +516,7 @@ export default function App() {
                 : ''}
           </p>
         )}
-        <MessageList messages={messages} />
+        <MessageList messages={messages} onApprove={onApproveTool} />
         <div ref={bottomRef} />
       </main>
 
@@ -469,8 +524,18 @@ export default function App() {
         {error && <div className="error-banner">{error}</div>}
         {page === 'chat' && (
           <div className="hints">
-            {['现在几点了？', '帮我算 123*456', '读一下 README.md', '当前改了什么？', '这个项目技术栈是什么？'].map(
-              (q) => (
+            <label className={codeTeam ? 'team-switch team-switch--on' : 'team-switch'}>
+              <input
+                type="checkbox"
+                checked={codeTeam}
+                onChange={(e) => setCodeTeam(e.target.checked)}
+              />
+              代码团队
+            </label>
+            {(codeTeam
+              ? ['看一下这个仓库怎么组织的', '给 README 加一句项目说明', '当前改了什么？']
+              : ['现在几点了？', '帮我算 123*456', '读一下 README.md', '当前改了什么？', '这个项目技术栈是什么？']
+            ).map((q) => (
                 <button
                   key={q}
                   type="button"
@@ -480,8 +545,7 @@ export default function App() {
                 >
                   {q}
                 </button>
-              ),
-            )}
+              ))}
           </div>
         )}
         <form

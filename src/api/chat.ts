@@ -17,6 +17,7 @@ const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '';
  */
 export async function streamChat(options: {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  mode?: 'default' | 'code_team';
   signal?: AbortSignal;
   onEvent: (event: SseEvent) => void;
 }) {
@@ -25,7 +26,7 @@ export async function streamChat(options: {
   try {
     const res = await axios.post(
       `${API_BASE}/api/chat`,
-      { messages: options.messages },
+      { messages: options.messages, mode: options.mode ?? 'default' },
       {
         adapter: 'fetch',
         responseType: 'stream',
@@ -87,6 +88,10 @@ export async function streamChat(options: {
       }
     }
   }
+}
+
+export async function postChatApprove(id: string, decision: 'approve' | 'deny') {
+  await axios.post(`${API_BASE}/api/chat/approve`, { id, decision })
 }
 
 /**

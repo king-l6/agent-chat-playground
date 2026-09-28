@@ -18,6 +18,11 @@
   background: #fef2f2;
 }
 
+.tool-card--awaiting_approval {
+  border-left-color: #d97706;
+  background: #fff7ed;
+}
+
 .tool-card--done {
   border-left-color: #10b981;
 }
@@ -141,4 +146,44 @@
 .tool-card__error {
   margin-top: 0.4rem;
   color: #b91c1c;
+}
+
+.tool-card__preview {
+  margin: 0.45rem 0 0;
+  padding: 0.5rem 0.6rem;
+  max-height: 140px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+}
+
+.tool-card__actions {
+  display: flex;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+}
+
+.tool-card__ok,
+.tool-card__no {
+  border: 0;
+  border-radius: 8px;
+  padding: 0.28rem 0.7rem;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.tool-card__ok {
+  background: #166534;
+  color: #fff;
+}
+
+.tool-card__no {
+  background: #fee2e2;
+  color: #991b1b;
 }

@@ -6,6 +6,9 @@
 /** 消息角色：用户 或 助手（系统提示在后端，前端列表里不展示 system） */
 export type Role = 'user' | 'assistant'
 
+/** 代码团队 / Delivery 流水线角色 */
+export type AgentRole = 'pm' | 'dev' | 'review' | 'qa' | 'explore' | 'implement'
+
 /**
  * 一条「工具调用」在 UI 上的展示数据
  * 问「现在几点」时会先出现一张 Tool 卡片，就用这个结构。
@@ -18,7 +21,9 @@ export interface ToolCallView {
   /** 模型传给工具的参数（JSON 字符串） */
   arguments: string
   /** 卡片状态：调用中 → 成功 / 失败 */
-  status: 'running' | 'done' | 'error'
+  status: 'running' | 'done' | 'error' | 'awaiting_approval'
+  /** 待批准写入时给卡片看的短预览 */
+  preview?: string
   /** 成功时工具返回的内容（通常是 JSON 字符串） */
   result?: string
   /** 失败时的错误信息 */
@@ -39,6 +44,7 @@ export type MessagePart =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'tool'; id: string }
+  | { type: 'role'; role: AgentRole; phase: 'start' | 'done' }
 
 /**
  * 聊天列表里的一条消息（用户气泡或助手气泡）
@@ -93,11 +99,12 @@ export type SseEvent =
   | { type: 'tool_result'; id: string; name: string; result: string }
   /** 工具执行失败：把对应卡片改成 error */
   | { type: 'tool_error'; id: string; name: string; error: string }
+  | { type: 'tool_approval'; id: string; name: string; arguments: string; preview?: string }
   /** 本轮对话正常结束，前端可以重新允许发送 */
   | { type: 'done' }
   /** 整轮出错（网络/模型异常等），前端展示错误并可结束 busy */
   | { type: 'error'; message: string }
-  | { type: 'role_start'; role: 'pm' | 'dev' | 'review' | 'qa' }
-  | { type: 'role_done'; role: 'pm' | 'dev' | 'review' | 'qa' }
+  | { type: 'role_start'; role: AgentRole }
+  | { type: 'role_done'; role: AgentRole }
   | { type: 'artifact'; name: string; payload: unknown }
   | { type: 'gate_blocked'; gate: string; message: string }

@@ -4,7 +4,7 @@
 import { useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { ToolCallView, UiMessage } from '../types'
+import type { AgentRole, ToolCallView, UiMessage } from '../types'
 import {
   groupCitationsByDoc,
   parseCitationHitsFromTools,
@@ -15,6 +15,16 @@ import { CitationMarkdown } from './CitationMarkdown'
 import { ChatImage } from './ChatImage'
 import { ToolCard } from './ToolCard'
 import './MessageList.css'
+
+function roleLabel(role: AgentRole) {
+  if (role === 'explore') return '探索'
+  if (role === 'implement') return '改码'
+  if (role === 'review') return '评审'
+  if (role === 'pm') return '产品'
+  if (role === 'dev') return '研发'
+  if (role === 'qa') return '测试'
+  return role
+}
 
 function groupSteps(tools: ToolCallView[]) {
   const groups: Array<{ step: number; tools: ToolCallView[] }> = []
@@ -30,9 +40,11 @@ function groupSteps(tools: ToolCallView[]) {
 function StepBlocks({
   tools,
   cited,
+  onApprove,
 }: {
   tools: ToolCallView[]
   cited: Set<number> | null
+  onApprove?: (id: string, decision: 'approve' | 'deny') => void
 }) {
   const groups = groupSteps(tools)
   return (
@@ -43,7 +55,7 @@ function StepBlocks({
             第 {group.step} 步 · {stepLabel(group.tools)}
           </p>
           {group.tools.map((tool) => (
-            <ToolCard key={tool.id} tool={tool} cited={cited} />
+            <ToolCard key={tool.id} tool={tool} cited={cited} onApprove={onApprove} />
           ))}
         </div>
       ))}
@@ -55,17 +67,20 @@ function MessageProcess({
   tools,
   streaming,
   cited,
+  onApprove,
 }: {
   tools: ToolCallView[]
   streaming: boolean
   cited: Set<number> | null
+  onApprove?: (id: string, decision: 'approve' | 'deny') => void
 }) {
   if (!tools.length) return null
-  const running = streaming || tools.some((t) => t.status === 'running')
+  const running =
+    streaming || tools.some((t) => t.status === 'running' || t.status === 'awaiting_approval')
   if (running) {
     return (
       <div className="msg__process msg__process--on">
-        <StepBlocks tools={tools} cited={cited} />
+        <StepBlocks tools={tools} cited={cited} onApprove={onApprove} />
       </div>
     )
   }
@@ -75,7 +90,7 @@ function MessageProcess({
       <summary>
         {steps > 1 ? `${steps} 步` : '1 步'} · {tools.length} 个工具
       </summary>
-      <StepBlocks tools={tools} cited={cited} />
+      <StepBlocks tools={tools} cited={cited} onApprove={onApprove} />
     </details>
   )
 }
@@ -197,6 +212,7 @@ type BodyRun =
   | { kind: 'text'; text: string }
   | { kind: 'reasoning'; text: string }
   | { kind: 'tools'; tools: ToolCallView[] }
+  | { kind: 'role'; role: AgentRole; phase: 'start' | 'done' }
 
 function bodyRuns(message: UiMessage): BodyRun[] {
   if (!message.parts) {
@@ -208,6 +224,10 @@ function bodyRuns(message: UiMessage): BodyRun[] {
   const byId = new Map(message.tools.map((tool) => [tool.id, tool]))
   const runs: BodyRun[] = []
   for (const part of message.parts) {
+    if (part.type === 'role') {
+      runs.push({ kind: 'role', role: part.role, phase: part.phase })
+      continue
+    }
     if (part.type === 'tool') {
       const tool = byId.get(part.id)
       if (!tool) continue
@@ -225,19 +245,33 @@ function bodyRuns(message: UiMessage): BodyRun[] {
   return runs
 }
 
-function AssistantBody({ message }: { message: UiMessage }) {
+function AssistantBody({
+  message,
+  onApprove,
+}: {
+  message: UiMessage
+  onApprove?: (id: string, decision: 'approve' | 'deny') => void
+}) {
   const streaming = message.status === 'streaming'
   const cited = streaming ? null : citationNumbers(message.content)
   const runs = bodyRuns(message)
   const waiting =
     streaming &&
     runs.length === 0 &&
-    message.tools.every((tool) => tool.status !== 'running')
+    message.tools.every((tool) => tool.status !== 'running' && tool.status !== 'awaiting_approval')
   return (
     <>
       {waiting && <div className="msg__content muted">思考中…</div>}
       {runs.map((run, index) => {
         const last = index === runs.length - 1
+        if (run.kind === 'role') {
+          if (run.phase === 'done') return null
+          return (
+            <div key={index} className="msg__role-bar">
+              {roleLabel(run.role)}
+            </div>
+          )
+        }
         if (run.kind === 'reasoning') {
           return streaming && last ? (
             <div key={index} className="msg__reason">
@@ -258,6 +292,7 @@ function AssistantBody({ message }: { message: UiMessage }) {
               tools={run.tools}
               streaming={streaming && last}
               cited={cited}
+              onApprove={onApprove}
             />
           )
         }
@@ -275,7 +310,13 @@ function AssistantBody({ message }: { message: UiMessage }) {
 }
 
 /** 接收整个 messages 数组，按条画文章气泡 */
-export function MessageList({ messages }: { messages: UiMessage[] }) {
+export function MessageList({
+  messages,
+  onApprove,
+}: {
+  messages: UiMessage[]
+  onApprove?: (id: string, decision: 'approve' | 'deny') => void
+}) {
   // 还没聊过：显示空状态引导
   if (messages.length === 0) {
     return (
@@ -299,7 +340,7 @@ export function MessageList({ messages }: { messages: UiMessage[] }) {
           <div className="msg__role">{m.role === 'user' ? '你' : '助手'}</div>
 
           {m.role === 'assistant' ? (
-            <AssistantBody message={m} />
+            <AssistantBody message={m} onApprove={onApprove} />
           ) : m.content ? (
             <div className="msg__content">
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ img: ChatImage }}>

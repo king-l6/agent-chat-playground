@@ -14,11 +14,13 @@ export interface ChatMessageInput {
 /**
  * 服务端内部也可用来记工具状态（当前主流程更多靠 SSE 直接推前端）
  */
+export type AgentRole = 'pm' | 'dev' | 'review' | 'qa' | 'explore' | 'implement'
+
 export interface ToolCallState {
   id: string
   name: string
   arguments: string
-  status: 'running' | 'done' | 'error'
+  status: 'running' | 'done' | 'error' | 'awaiting_approval'
   result?: string
   error?: string
 }
@@ -47,11 +49,13 @@ export type SseEvent =
   | { type: 'tool_result'; id: string; name: string; result: string }
   /** 工具失败 */
   | { type: 'tool_error'; id: string; name: string; error: string }
+  /** 写入工作区前等人点批准，arguments 是完整参数，preview 是给卡片看的摘要 */
+  | { type: 'tool_approval'; id: string; name: string; arguments: string; preview?: string }
   /** 本轮结束 */
   | { type: 'done' }
   /** 整轮异常 */
   | { type: 'error'; message: string }
-  | { type: 'role_start'; role: 'pm' | 'dev' | 'review' | 'qa' }
-  | { type: 'role_done'; role: 'pm' | 'dev' | 'review' | 'qa' }
+  | { type: 'role_start'; role: AgentRole }
+  | { type: 'role_done'; role: AgentRole }
   | { type: 'artifact'; name: string; payload: unknown }
   | { type: 'gate_blocked'; gate: string; message: string }

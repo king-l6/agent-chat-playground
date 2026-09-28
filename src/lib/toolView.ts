@@ -112,6 +112,10 @@ export function summarizeTool(tool: ToolCallView): ToolSummary {
 
   if (tool.name === 'workspace_read' || tool.name === 'workspace_write' || tool.name === 'workspace_list') {
     const path = str(result?.path) || str(args?.path) || '.'
+    if (tool.name === 'workspace_write') {
+      const preview = tool.preview || str(args?.content).slice(0, 160)
+      return { kind: 'text', line: preview ? `${path} · ${preview}` : path }
+    }
     return { kind: 'text', line: path }
   }
 

@@ -15,6 +15,7 @@ function statusText(tool: ToolCallView, skill: boolean) {
   const time =
     tool.ms == null ? '' : tool.ms < 1000 ? ` · ${tool.ms} ms` : ` · ${(tool.ms / 1000).toFixed(1)} s`
   if (tool.status === 'running') return skill ? '加载中…' : '调用中…'
+  if (tool.status === 'awaiting_approval') return '待批准'
   if (tool.status === 'done') return `${skill ? '已加载' : '完成'}${time}`
   return `失败${time}`
 }
@@ -125,7 +126,15 @@ function formatJson(raw: string) {
   }
 }
 
-export function ToolCard({ tool, cited = null }: { tool: ToolCallView; cited?: Set<number> | null }) {
+export function ToolCard({
+  tool,
+  cited = null,
+  onApprove,
+}: {
+  tool: ToolCallView
+  cited?: Set<number> | null
+  onApprove?: (id: string, decision: 'approve' | 'deny') => void
+}) {
   const skill = tool.name === 'load_skill'
   const skillName = skill ? summarizeTool(tool) : null
   const title =
@@ -133,6 +142,7 @@ export function ToolCard({ tool, cited = null }: { tool: ToolCallView; cited?: S
       ? `skill:${skillName.name}`
       : tool.name
   const raw = tool.status === 'done' ? rawPayload(tool) : formatJson(tool.arguments || '')
+  const waiting = tool.status === 'awaiting_approval'
 
   return (
     <div className={`tool-card tool-card--${tool.status}${skill ? ' tool-card--skill' : ''}`}>
@@ -141,6 +151,21 @@ export function ToolCard({ tool, cited = null }: { tool: ToolCallView; cited?: S
         <span className="tool-card__status">{statusText(tool, skill)}</span>
       </div>
       <Summary tool={tool} cited={cited} />
+      {waiting && tool.preview && (
+        <pre className="tool-card__preview">
+          <code>{tool.preview}</code>
+        </pre>
+      )}
+      {waiting && onApprove && (
+        <div className="tool-card__actions">
+          <button type="button" className="tool-card__ok" onClick={() => onApprove(tool.id, 'approve')}>
+            批准写入
+          </button>
+          <button type="button" className="tool-card__no" onClick={() => onApprove(tool.id, 'deny')}>
+            拒绝
+          </button>
+        </div>
+      )}
       {tool.error && <div className="tool-card__error">{tool.error}</div>}
       {raw.trim() && (
         <details className="tool-card__raw">

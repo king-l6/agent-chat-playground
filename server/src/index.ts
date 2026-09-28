@@ -9,6 +9,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import multer from 'multer'
 import { resolveLlmConfig, runAgentChat } from './agent.js'
+import { resolveApproval, runCodeTeamChat } from './codeTeam.js'
 import {
   importClaudeMcp,
   publicMcp,
@@ -1369,6 +1370,8 @@ app.post('/api/chat', async (req, res) => {
     return
   }
 
+  const chatMode = req.body?.mode === 'code_team' ? 'code_team' : 'default'
+
   // 只保留合法 user/assistant，并截断过长 content，防滥用
   const normalized = messages
     .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
@@ -1388,9 +1391,11 @@ app.post('/api/chat', async (req, res) => {
   res.flushHeaders?.()
 
   let closed = false
+  const abort = new AbortController()
   // 注意：不要用 req.on('close') —— POST body 读完就可能触发，会误停 SSE
   res.on('close', () => {
     closed = true
+    abort.abort()
   })
 
   /** 写一条 SSE：data: {...}\n\n */
@@ -1400,8 +1405,11 @@ app.post('/api/chat', async (req, res) => {
   }
 
   try {
-    // 把 send 交给 Agent：它负责推 meta / text / tool / done
-    await runAgentChat({ messages: normalized, send })
+    if (chatMode === 'code_team') {
+      await runCodeTeamChat({ messages: normalized, send, signal: abort.signal })
+    } else {
+      await runAgentChat({ messages: normalized, send })
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     send({ type: 'error', message })
@@ -1409,6 +1417,21 @@ app.post('/api/chat', async (req, res) => {
   } finally {
     if (!closed) res.end()
   }
+})
+
+/** 批准或拒绝代码团队挂起的 workspace_write */
+app.post('/api/chat/approve', (req, res) => {
+  const id = typeof req.body?.id === 'string' ? req.body.id : ''
+  const decision = req.body?.decision === 'deny' ? 'deny' : req.body?.decision === 'approve' ? 'approve' : ''
+  if (!id || !decision) {
+    res.status(400).json({ error: '需要 id 和 decision（approve / deny）' })
+    return
+  }
+  if (!resolveApproval(id, decision)) {
+    res.status(404).json({ error: '没有这条待批准写入，可能已超时或已处理' })
+    return
+  }
+  res.json({ ok: true })
 })
 
 /* ===================== 长期记忆 ===================== */
