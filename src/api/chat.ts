@@ -456,13 +456,75 @@ export async function deleteKnowledgeFile(docId: string) {
   return data
 }
 
+export type WorkflowTrace = {
+  retrieval?: string
+  query?: string
+  rewriteTerms?: string[]
+  hits?: Array<{ citation: number; title: string; score?: number; rerank?: number }>
+}
+
+export type WorkflowStreamEvent =
+  | { type: 'step_start'; id: string }
+  | {
+      type: 'step_done'
+      id: string
+      output: string
+      ms: number
+      trace?: WorkflowTrace
+    }
+  | { type: 'done'; answer: string }
+  | { type: 'error'; message: string }
+
 export async function runWorkflow(
   question: string,
-  pipeline: Array<{ id: string; kind: 'search' | 'answer' | 'calc'; expression?: string }>,
+  pipeline: Array<{ id: string; kind: 'search' | 'answer' | 'calc'; expression?: string; topK?: number }>,
 ) {
   const { data } = await axios.post<{
-    steps: Array<{ id: string; output: string }>
+    steps: Array<{ id: string; output: string; ms?: number; trace?: WorkflowTrace }>
     answer: string
   }>(`${API_BASE}/api/workflow/run`, { question, pipeline })
   return data
+}
+
+/** 画布按节点往下亮：每走完一步推一条 SSE，不必等整张图结束 */
+export async function streamWorkflow(options: {
+  question: string
+  pipeline: Array<{ id: string; kind: 'search' | 'answer' | 'calc'; expression?: string; topK?: number }>
+  onEvent: (event: WorkflowStreamEvent) => void
+}) {
+  const res = await axios.post(
+    `${API_BASE}/api/workflow/run`,
+    { question: options.question, pipeline: options.pipeline, stream: true },
+    {
+      adapter: 'fetch',
+      responseType: 'stream',
+      headers: { 'Content-Type': 'application/json' },
+    },
+  )
+  const stream = res.data as ReadableStream<Uint8Array>
+  if (!stream) throw new Error('编排没有返回')
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const chunks = buffer.split('\n\n')
+    buffer = chunks.pop() ?? ''
+    for (const chunk of chunks) {
+      const line = chunk
+        .split('\n')
+        .map((l) => l.trim())
+        .find((l) => l.startsWith('data:'))
+      if (!line) continue
+      const payload = line.slice(5).trim()
+      if (!payload) continue
+      try {
+        options.onEvent(JSON.parse(payload) as WorkflowStreamEvent)
+      } catch {
+        // 半包跳过
+      }
+    }
+  }
 }

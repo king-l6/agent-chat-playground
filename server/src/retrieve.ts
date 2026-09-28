@@ -1262,11 +1262,12 @@ export async function retrieve(
   query: string,
   topK = 3,
   userQuery?: string,
+  mode: 'hybrid' | 'keyword' = 'hybrid',
 ): Promise<RetrieveResult> {
   const rewritten = rewriteQuery(query)
   if (memory === null) await ensureIndex()
 
-  if (readyMode === 'hybrid' && memory && memory.length > 0) {
+  if (mode !== 'keyword' && readyMode === 'hybrid' && memory && memory.length > 0) {
     // 候选要比 topK 多：聚合会把同一篇的多个块并成一个名额，留够才不会缩水
     const pool = HYBRID_CANDIDATES(topK)
     const textRanked = await searchRerank(query, memory, pool)

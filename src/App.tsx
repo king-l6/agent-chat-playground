@@ -4,7 +4,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { streamChat, toApiMessages, fetchHealth, type RagStatus, type SkillMeta, type McpPublic } from './api/chat';
-import type { SseEvent, UiMessage } from './types';
+import type { SseEvent, UiMessage, MessagePart } from './types';
 import { MessageList } from './components/MessageList';
 import { DocumentsPage } from './components/DocumentsPage';
 import { MemoryPage } from './components/MemoryPage';
@@ -28,6 +28,27 @@ import './components/AppShell.css';
 
 /** 输入框自动长高的上限（px）。和 AppShell.css 里 .composer textarea 的 max-height 必须一致 */
 const COMPOSER_MAX_HEIGHT = 180
+
+/** 文字和思考会粘到上一个同类零件上；工具另起一块 */
+function withTtft(m: UiMessage): UiMessage {
+  if (m.ttftMs != null || m.startedAt == null) return m
+  return { ...m, ttftMs: Date.now() - m.startedAt }
+}
+
+function appendPart(parts: MessagePart[] | undefined, incoming: MessagePart): MessagePart[] {
+  const next = [...(parts ?? [])]
+  const last = next[next.length - 1]
+  if (
+    last &&
+    incoming.type !== 'tool' &&
+    last.type === incoming.type
+  ) {
+    next[next.length - 1] = { type: last.type, text: last.text + incoming.text }
+    return next
+  }
+  next.push(incoming)
+  return next
+}
 
 function pageFromHash(): 'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery' | 'video' {
   const path = location.hash.replace(/^#\/?/, '').split('?')[0]
@@ -173,31 +194,63 @@ export default function App() {
       return;
     }
     if (event.type === 'text_delta') {
-      // 追加一段文字，并标成 streaming
-      patchAssistant(sessionId, assistantId, (m) => ({
-        ...m,
-        content: m.content + event.delta,
-        status: 'streaming',
-      }));
+      patchAssistant(sessionId, assistantId, (m) => {
+        const base = withTtft(m)
+        return {
+          ...base,
+          content: base.content + event.delta,
+          parts: appendPart(base.parts, { type: 'text', text: event.delta }),
+          status: 'streaming',
+        }
+      });
       return;
     }
-    if (event.type === 'tool_start') {
-      // 插入/替换一张 running 卡片（同 id 先滤掉再加，避免重复）
+    if (event.type === 'reasoning_delta') {
       patchAssistant(sessionId, assistantId, (m) => {
+        const base = withTtft(m)
         return {
-          ...m,
+          ...base,
+          parts: appendPart(base.parts, { type: 'reasoning', text: event.delta }),
+          status: 'streaming',
+        }
+      })
+      return
+    }
+    if (event.type === 'step') {
+      patchAssistant(sessionId, assistantId, (m) => ({ ...m, step: event.index }))
+      return
+    }
+    if (event.type === 'tool_start') {
+      patchAssistant(sessionId, assistantId, (m) => {
+        const base = withTtft(m)
+        const parts = base.parts ?? []
+        const known = parts.some((part) => part.type === 'tool' && part.id === event.id)
+        return {
+          ...base,
+          parts: known ? parts : [...parts, { type: 'tool' as const, id: event.id }],
           tools: [
-            ...m.tools.filter((t) => t.id !== event.id),
+            ...base.tools.filter((t) => t.id !== event.id),
             {
               id: event.id,
               name: event.name,
               arguments: event.arguments,
-              status: 'running',
+              status: 'running' as const,
+              step: base.step ?? 1,
+              startedAt: Date.now(),
             },
           ],
         };
       });
       return;
+    }
+    if (event.type === 'tool_args') {
+      patchAssistant(sessionId, assistantId, (m) => ({
+        ...m,
+        tools: m.tools.map((t) =>
+          t.id === event.id && t.status === 'running' ? { ...t, arguments: event.arguments } : t,
+        ),
+      }))
+      return
     }
     if (event.type === 'tool_result') {
       // 对应卡片改为完成，写入 result
@@ -206,7 +259,13 @@ export default function App() {
           ...m,
           tools: m.tools.map((t) =>
             t.id === event.id
-              ? { ...t, status: 'done', result: event.result }
+              ? {
+                  ...t,
+                  status: 'done',
+                  result: event.result,
+                  ms: t.startedAt ? Date.now() - t.startedAt : t.ms,
+                  startedAt: undefined,
+                }
               : t,
           ),
         };
@@ -219,7 +278,13 @@ export default function App() {
           ...m,
           tools: m.tools.map((t) =>
             t.id === event.id
-              ? { ...t, status: 'error', error: event.error }
+              ? {
+                  ...t,
+                  status: 'error',
+                  error: event.error,
+                  ms: t.startedAt ? Date.now() - t.startedAt : t.ms,
+                  startedAt: undefined,
+                }
               : t,
           ),
         };
@@ -232,7 +297,12 @@ export default function App() {
       return;
     }
     if (event.type === 'done') {
-      patchAssistant(sessionId, assistantId, (m) => ({ ...m, status: 'done' }));
+      patchAssistant(sessionId, assistantId, (m) => ({
+        ...m,
+        status: 'done',
+        totalMs: m.startedAt ? Date.now() - m.startedAt : m.totalMs,
+        startedAt: undefined,
+      }));
     }
   }
 
@@ -300,7 +370,9 @@ export default function App() {
       role: 'assistant',
       content: '',
       tools: [],
+      parts: [],
       status: 'streaming',
+      startedAt: Date.now(),
     };
 
     setSessions((prev) => {
@@ -329,7 +401,14 @@ export default function App() {
         onEvent: (event) => handleEvent(sessionId, assistantId, event),
       });
       patchAssistant(sessionId, assistantId, (m) =>
-        m.status === 'streaming' ? { ...m, status: 'done' } : m,
+        m.status === 'streaming'
+          ? {
+              ...m,
+              status: 'done',
+              totalMs: m.startedAt ? Date.now() - m.startedAt : m.totalMs,
+              startedAt: undefined,
+            }
+          : m,
       );
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
@@ -337,6 +416,8 @@ export default function App() {
           ...m,
           status: 'done',
           content: m.content || '（已停止）',
+          totalMs: m.startedAt ? Date.now() - m.startedAt : m.totalMs,
+          startedAt: undefined,
         }));
       } else {
         const message = err instanceof Error ? err.message : String(err);
@@ -345,6 +426,8 @@ export default function App() {
           ...m,
           status: 'error',
           content: m.content || `出错了：${message}`,
+          totalMs: m.startedAt ? Date.now() - m.startedAt : m.totalMs,
+          startedAt: undefined,
         }));
       }
     } finally {

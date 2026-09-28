@@ -112,6 +112,7 @@ async function preloadMatchedSkills(
   send: Send,
 ) {
   if (!matchesInterviewSkill(lastUser)) return;
+  send({ type: 'step', index: 1 });
   const args = JSON.stringify({ name: 'job-interview' });
   const id = 'skill_job-interview';
   send({ type: 'tool_start', id, name: 'load_skill', arguments: args });
@@ -172,6 +173,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
 
   // —— 时间 ——
   if (wantsTime) {
+    send({ type: 'step', index: 1 });
     const id = 'mock_time_1';
     const args = '{}';
     send({ type: 'tool_start', id, name: 'get_current_time', arguments: args });
@@ -186,6 +188,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
 
   // —— 计算 ——
   if (wantsCalc) {
+    send({ type: 'step', index: 1 });
     const match = last.match(/[\d.\s+\-*/()]+/);
     const expression = (match?.[0] ?? '1+1').trim();
     const id = 'mock_calc_1';
@@ -207,6 +210,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
   }
 
   if (wantsGit) {
+    send({ type: 'step', index: 1 });
     const statusId = 'mock_git_status'
     send({ type: 'tool_start', id: statusId, name: 'git_status', arguments: '{}' })
     await sleep(160)
@@ -235,6 +239,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
 
   // —— 工作区读文件（先于知识库，避免「读 README」被搜笔记抢走）——
   if (wantsWorkspace) {
+    send({ type: 'step', index: 1 });
     const rel =
       last.match(/([\w./-]+\.(?:md|txt|ts|tsx|json))/)?.[1] ?? 'README.md'
     const id = 'mock_ws_1'
@@ -260,6 +265,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
 
   // —— Skill：先加载说明书，再按正文去检索 ——
   if (wantsInterviewSkill) {
+    send({ type: 'step', index: 1 });
     const skillId = 'mock_skill_1';
     const skillArgs = JSON.stringify({ name: 'job-interview' });
     send({ type: 'tool_start', id: skillId, name: 'load_skill', arguments: skillArgs });
@@ -267,6 +273,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
     const skillResult = await executeTool('load_skill', skillArgs);
     send({ type: 'tool_result', id: skillId, name: 'load_skill', result: skillResult });
 
+    send({ type: 'step', index: 2 });
     const searchId = 'mock_search_1';
     const searchArgs = JSON.stringify({ query: last });
     send({ type: 'tool_start', id: searchId, name: 'search_notes', arguments: searchArgs });
@@ -290,6 +297,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
 
   // —— 简易知识库 ——
   if (wantsSearch) {
+    send({ type: 'step', index: 1 });
     const id = 'mock_search_1';
     const args = JSON.stringify({ query: last });
     send({ type: 'tool_start', id, name: 'search_notes', arguments: args });
@@ -374,6 +382,8 @@ async function runLive(
 
   const tools = getToolDefinitions()
   const maxRounds = mcpToolDefinitions().length > 0 ? 6 : 4
+  // 预加载 skill 已经占用了第 1 步，模型后面再调工具从下一步开始
+  let step = matchesInterviewSkill(lastUser) ? 1 : 0
   for (let round = 0; round < maxRounds; round += 1) {
     // 开启一轮流式补全，并声明可用工具
     const stream = await client.chat.completions.create({
@@ -388,19 +398,42 @@ async function runLive(
       number,
       { id: string; name: string; arguments: string }
     >();
+    const announced = new Set<string>();
+    let stepped = false;
     let finishReason: string | null = null;
-    // 消费流：文本立刻推前端；tool_calls 先攒着
+    // 消费流：文本立刻推前端；工具参数边到边推（tool-input-delta）
     for await (const chunk of stream) {
       const choice = chunk.choices[0];
       if (!choice) continue;
       finishReason = choice.finish_reason ?? finishReason;
       const delta = choice.delta;
+      const reasoning = (delta as { reasoning_content?: string } | undefined)?.reasoning_content;
+      if (reasoning) send({ type: 'reasoning_delta', delta: reasoning });
       if (delta?.content) {
         assistantText += delta.content;
         send({ type: 'text_delta', delta: delta.content });
       }
       if (delta?.tool_calls) {
         collectToolCallDeltas(toolAcc, delta.tool_calls);
+        if (!stepped) {
+          step += 1;
+          send({ type: 'step', index: step });
+          stepped = true;
+        }
+        toolAcc.forEach((tool) => {
+          if (!tool.id || !tool.name) return
+          if (!announced.has(tool.id)) {
+            announced.add(tool.id)
+            send({
+              type: 'tool_start',
+              id: tool.id,
+              name: tool.name,
+              arguments: tool.arguments,
+            })
+          } else {
+            send({ type: 'tool_args', id: tool.id, arguments: tool.arguments })
+          }
+        })
       }
     }
     // 把攒好的 toolAcc 转成 OpenAI 要求的 tool_calls 结构
@@ -420,6 +453,10 @@ async function runLive(
       return;
     }
 
+    if (!stepped) {
+      step += 1
+      send({ type: 'step', index: step })
+    }
     // 先把「助手决定调工具」这条消息写入 history
     history.push({
       role: 'assistant',
@@ -431,7 +468,11 @@ async function runLive(
       if (call.type !== 'function') continue
       const name = call.function.name;
       const args = call.function.arguments;
-      send({ type: 'tool_start', id: call.id, name, arguments: args });
+      if (!announced.has(call.id)) {
+        send({ type: 'tool_start', id: call.id, name, arguments: args });
+      } else {
+        send({ type: 'tool_args', id: call.id, arguments: args });
+      }
       try {
         // 把用户原话一起给下去：search_notes 判时间意图要用它，模型组的 query 会丢词
         const result = await executeTool(name, args, { userQuery: lastUser });

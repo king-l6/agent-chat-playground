@@ -43,6 +43,10 @@
   background: #fffbeb;
 }
 
+.msg__step + .msg__step {
+  margin-top: 0.55rem;
+}
+
 .msg__process-head,
 .msg__process summary {
   margin: 0 0 0.3rem;
@@ -50,6 +54,141 @@
   font-weight: 700;
   color: #64748b;
   cursor: pointer;
+}
+
+.sources {
+  margin: 0.7rem 0 0.1rem;
+}
+
+.sources__unused {
+  margin-top: 0.4rem;
+}
+
+.sources__unused summary {
+  cursor: pointer;
+  color: #64748b;
+  font-size: 0.75rem;
+  margin-bottom: 0.3rem;
+}
+
+.msg__reason {
+  margin: 0.35rem 0 0.65rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px dashed #e2e8f0;
+  border-radius: 10px;
+  color: #475569;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.msg__reason summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #64748b;
+}
+
+.sources__label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #64748b;
+  margin-bottom: 0.35rem;
+}
+
+.sources__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.source {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  border: 1px solid #dbe3ee;
+  background: #f8fafc;
+  color: #0f172a;
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem 0.15rem 0.2rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+.source--on {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+
+.source__n {
+  flex: none;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-weight: 700;
+  font-size: 0.72rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.source__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 16rem;
+}
+
+.sources__detail {
+  margin-top: 0.45rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.sources__detail a {
+  color: #1d4ed8;
+  font-weight: 650;
+}
+
+.sources__seg {
+  margin-top: 0.45rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid #e2e8f0;
+}
+
+.sources__seg:first-of-type {
+  border-top: none;
+  padding-top: 0.25rem;
+}
+
+.sources__seg-meta {
+  font-size: 0.72rem;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 0.15rem;
+}
+
+.msg__timing {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 0.45rem;
+  font-size: 0.72rem;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+
+.sources__detail p {
+  margin: 0.3rem 0 0;
+  color: #334155;
 }
 
 .msg__process summary::-webkit-details-marker {

@@ -23,7 +23,22 @@ export interface ToolCallView {
   result?: string
   /** 失败时的错误信息 */
   error?: string
+  /** 属于 Agent 的第几步；同一步里可以有多张卡片 */
+  step?: number
+  /** 从发出 tool_start 到结果回来的毫秒 */
+  ms?: number
+  /** 前端计时用，不展示 */
+  startedAt?: number
 }
+
+/**
+ * 一条助手消息里的零件，顺序就是 SSE 到达顺序。
+ * 对应 AI SDK 的 UIMessage.parts：文字、思考、工具穿插，而不是先堆完工具再贴正文。
+ */
+export type MessagePart =
+  | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string }
+  | { type: 'tool'; id: string }
 
 /**
  * 聊天列表里的一条消息（用户气泡或助手气泡）
@@ -40,6 +55,16 @@ export interface UiMessage {
   tools: ToolCallView[]
   /** 整条消息状态：流式中 / 完成 / 出错 */
   status: 'done' | 'streaming' | 'error'
+  /** 当前 Agent 步号；tool_start 时抄到对应卡片上 */
+  step?: number
+  /** 有这个字段时按零件顺序渲染；旧会话没有，就退回「工具在上、正文在下」 */
+  parts?: MessagePart[]
+  /** 发出请求的本地时间戳，用来算 ttft / total */
+  startedAt?: number
+  /** 首个 text / tool / reasoning 到达的毫秒数，对应 assistant-ui MessageTiming.ttft */
+  ttftMs?: number
+  /** 整轮结束耗时 */
+  totalMs?: number
 }
 
 /**
@@ -56,8 +81,14 @@ export type SseEvent =
   | { type: 'meta'; mode: 'live' | 'mock'; model?: string }
   /** 助手文本的一小段增量，前端拼到 content 上形成「打字机」效果 */
   | { type: 'text_delta'; delta: string }
+  /** 多步 Agent 进入新的一轮，后面的工具卡片归到这一步 */
+  | { type: 'step'; index: number }
+  /** 模型思考过程的增量，对应 AI SDK 的 reasoning-delta，不写进最终回答 */
+  | { type: 'reasoning_delta'; delta: string }
   /** 开始调用工具：前端插入一张 status=running 的卡片 */
   | { type: 'tool_start'; id: string; name: string; arguments: string }
+  /** 工具参数还没写完，卡片上的 arguments 整段替换。对应 tool-input-delta */
+  | { type: 'tool_args'; id: string; arguments: string }
   /** 工具执行成功：把对应卡片改成 done，并带上 result */
   | { type: 'tool_result'; id: string; name: string; result: string }
   /** 工具执行失败：把对应卡片改成 error */

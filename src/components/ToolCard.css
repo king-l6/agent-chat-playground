@@ -40,8 +40,76 @@
   display: flex;
   justify-content: space-between;
   gap: 0.75rem;
-  margin-bottom: 0.45rem;
   font-weight: 600;
+}
+
+.tool-card__sum {
+  margin-top: 0.35rem;
+}
+
+.tool-card__line {
+  margin: 0.35rem 0 0;
+  color: #1e293b;
+  line-height: 1.45;
+}
+
+.tool-card__line--sub {
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.tool-hits {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.tool-hits li {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+}
+
+.tool-hits__n {
+  flex: none;
+  min-width: 1.1rem;
+  font-variant-numeric: tabular-nums;
+  color: #1d4ed8;
+  font-weight: 700;
+}
+
+.tool-hits__body {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.tool-hits__title {
+  color: #0f172a;
+}
+
+.tool-hits__meta {
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-hits__unused .tool-hits__title,
+.tool-hits__unused .tool-hits__n {
+  color: #94a3b8;
+}
+
+.tool-card__raw {
+  margin-top: 0.45rem;
+}
+
+.tool-card__raw summary {
+  cursor: pointer;
+  color: #64748b;
+  font-size: 0.78rem;
 }
 
 .tool-card__name {

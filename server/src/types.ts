@@ -32,8 +32,17 @@ export type SseEvent =
   | { type: 'meta'; mode: 'live' | 'mock'; model?: string }
   /** 文本增量 */
   | { type: 'text_delta'; delta: string }
+  /**
+   * 多步 Agent 的一轮。后面紧跟的 tool_* 都属于这一步，
+   * 直到下一个 step。前端按这个把工具卡片分成「第 N 步」。
+   */
+  | { type: 'step'; index: number }
+  /** 模型的思考增量，不进最终回答 */
+  | { type: 'reasoning_delta'; delta: string }
   /** 开始调工具 */
   | { type: 'tool_start'; id: string; name: string; arguments: string }
+  /** 工具参数的增量快照，arguments 是截至目前拼出来的整段 */
+  | { type: 'tool_args'; id: string; arguments: string }
   /** 工具成功返回 */
   | { type: 'tool_result'; id: string; name: string; result: string }
   /** 工具失败 */

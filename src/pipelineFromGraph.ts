@@ -8,6 +8,9 @@ export type GraphNode = {
   id: string
   kind: GraphKind
   expression?: string
+  topK?: number
+  retrieval?: 'hybrid' | 'keyword'
+  query?: string
 }
 
 export type GraphEdge = {
@@ -20,6 +23,9 @@ export type PipeStep = {
   id: string
   kind: 'search' | 'answer' | 'calc'
   expression?: string
+  topK?: number
+  retrieval?: 'hybrid' | 'keyword'
+  query?: string
 }
 
 export function looksLikeMath(question: string) {
@@ -28,11 +34,22 @@ export function looksLikeMath(question: string) {
 
 function asStep(node: GraphNode): PipeStep | null {
   if (node.kind !== 'search' && node.kind !== 'answer' && node.kind !== 'calc') return null
+  const topK = node.kind === 'search' ? clampTopK(node.topK) : undefined
+  const retrieval = node.kind === 'search' && node.retrieval === 'keyword' ? 'keyword' : undefined
+  const query = node.kind === 'search' ? node.query?.trim() : undefined
   return {
     id: node.id,
     kind: node.kind,
     expression: node.kind === 'calc' ? node.expression : undefined,
+    ...(topK != null ? { topK } : {}),
+    ...(retrieval ? { retrieval } : {}),
+    ...(query ? { query } : {}),
   }
+}
+
+function clampTopK(value: number | undefined) {
+  if (value == null || !Number.isFinite(value)) return 3
+  return Math.min(8, Math.max(1, Math.round(value)))
 }
 
 export function pipelineFromGraph(

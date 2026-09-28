@@ -1290,13 +1290,26 @@ app.post('/api/workflow/run', async (req, res) => {
     ? raw
         .map((item: unknown): PipelineStep | null => {
           if (!item || typeof item !== 'object') return null
-          const rec = item as { id?: unknown; kind?: unknown; expression?: unknown }
+          const rec = item as {
+            id?: unknown
+            kind?: unknown
+            expression?: unknown
+            topK?: unknown
+            retrieval?: unknown
+            query?: unknown
+          }
           const kind = rec.kind
           if (kind !== 'search' && kind !== 'answer' && kind !== 'calc') return null
+          const topK = Number(rec.topK)
+          const retrieval = rec.retrieval === 'keyword' ? 'keyword' : rec.retrieval === 'hybrid' ? 'hybrid' : undefined
+          const query = typeof rec.query === 'string' ? rec.query : undefined
           return {
             id: String(rec.id ?? kind),
             kind,
             expression: rec.expression != null ? String(rec.expression) : undefined,
+            ...(Number.isFinite(topK) ? { topK } : {}),
+            ...(retrieval ? { retrieval } : {}),
+            ...(query ? { query } : {}),
           }
         })
         .filter((s): s is PipelineStep => s != null)
@@ -1306,6 +1319,34 @@ app.post('/api/workflow/run', async (req, res) => {
       ]
   if (pipeline.length === 0) {
     res.status(400).json({ error: '请从「提问」连出至少一步' })
+    return
+  }
+  if (req.body?.stream === true) {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')
+    res.flushHeaders?.()
+    let closed = false
+    res.on('close', () => {
+      closed = true
+    })
+    const send = (event: unknown) => {
+      if (closed || res.writableEnded) return
+      res.write(`data: ${JSON.stringify(event)}\n\n`)
+    }
+    try {
+      const result = await runWorkflow(question, pipeline, {
+        onStart: (id) => send({ type: 'step_start', id }),
+        onDone: (step) => send({ type: 'step_done', ...step }),
+      })
+      send({ type: 'done', answer: result.answer })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      send({ type: 'error', message })
+    } finally {
+      if (!closed) res.end()
+    }
     return
   }
   try {
