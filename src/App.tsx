@@ -821,20 +821,39 @@ export default function App() {
           {/*
            * 生成中「发送」和「停止」并存：原来 busy 时整颗发送键被换成停止键，
            * 于是没法插话。现在发送始终在，旁边多一颗停止（生成中才出现）。
+           * 外观对齐 Cursor：圆钮 + 上箭头 / 方块停止。
            */}
           <div className="composer__actions">
             {activeBusy && (
               <button
                 type="button"
-                className="btn btn--stop"
+                className="composer__icon-btn composer__icon-btn--stop"
                 onClick={onStop}
                 title="只打断最新那一条；此前已经开出去的几轮会各自跑完"
+                aria-label="停止"
               >
-                停止
+                <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                  <rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" />
+                </svg>
               </button>
             )}
-            <button type="submit" className="btn" disabled={!input.trim()}>
-              发送
+            <button
+              type="submit"
+              className="composer__icon-btn composer__icon-btn--send"
+              disabled={!input.trim()}
+              aria-label="发送"
+              title="发送"
+            >
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path
+                  d="M12 19V5M6 11l6-6 6 6"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.25"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </button>
           </div>
           {/*

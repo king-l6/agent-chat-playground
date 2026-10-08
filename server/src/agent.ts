@@ -10,8 +10,9 @@ import type {
 } from 'openai/resources/chat/completions';
 import { resolveLlmFromSettings } from './settings.js';
 import { skillsCatalogText } from './skills.js';
-import { mcpInstructions, mcpToolDefinitions } from './mcp.js';
+import { mcpInstructions, mcpToolDefinitions, publicMcp } from './mcp.js';
 import { executeTool, getToolDefinitions } from './tools.js';
+import { filterToolsByIntent, routeIntent } from './intent.js';
 import { workspaceDigest } from './workspace.js';
 import { memoryBlockFor } from './memory/recall.js';
 import type { ChatMessageInput, SseEvent } from './types.js';
@@ -181,7 +182,7 @@ async function preloadMatchedSkills(
 }
 
 /**
- * Mock 模式：不调大模型，用正则猜意图，仍走「工具卡片 + 流式文字」
+ * Mock 模式：不调大模型，用 routeIntent 猜意图，仍走「工具卡片 + 流式文字」
  * 方便没 Key 时也能演示完整 UI。
  */
 async function streamMock(messages: ChatMessageInput[], send: Send) {
@@ -189,22 +190,8 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
 
   // 取最后一条用户话
   const last = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
-  const lower = last.toLowerCase();
-
-  const wantsTime = /几点|时间|日期|now|time/.test(lower);
-  const wantsCalc = /算|计算|\d+\s*[\+\-\*\/]/.test(lower);
+  const intent = routeIntent(last);
   const wantsInterviewSkill = matchesInterviewSkill(last);
-  const wantsSearch = /项目|sse|tool|agent|技术栈|简历|rag|知识库/.test(lower);
-  // 「这个项目 / 这个仓库 / 当前工作区」= 已连接的工作区，与 live 的规则 3/9 对齐；
-  // 这一段必须排在知识库之前，否则「这个项目是干什么的」会被 search_notes 抢走
-  const wantsWorkspace =
-    /readme|\.md|工作区|这个项目|这个仓库|这个代码库|当前代码库|本仓库|读一下.*文件|打开.*文件|workspace_read/i.test(
-      last,
-    ) && /读|看|打开|列出|list|readme|项目|仓库|代码库/i.test(last);
-  // 统一用小写比较：写全大写 GIT STATUS 也要能命中
-  const wantsGit = /改了什么|当前改动|未提交|git status|git diff|有哪些改|看一下 diff/.test(
-    lower,
-  );
 
   /** 把整段回答拆成小块推 text_delta，模拟打字机 */
   const streamText = async (text: string) => {
@@ -219,7 +206,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
   };
 
   // —— 时间 ——
-  if (wantsTime) {
+  if (intent === 'time') {
     send({ type: 'step', index: 1 });
     const id = 'mock_time_1';
     const args = '{}';
@@ -241,7 +228,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
   }
 
   // —— 计算 ——
-  if (wantsCalc) {
+  if (intent === 'calc') {
     send({ type: 'step', index: 1 });
     const match = last.match(/[\d.\s+\-*/()]+/);
     const expression = (match?.[0] ?? '1+1').trim();
@@ -263,7 +250,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
     return;
   }
 
-  if (wantsGit) {
+  if (intent === 'git') {
     send({ type: 'step', index: 1 });
     const statusId = 'mock_git_status'
     send({ type: 'tool_start', id: statusId, name: 'git_status', arguments: '{}' })
@@ -291,8 +278,8 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
     return
   }
 
-  // —— 工作区读文件（先于知识库，避免「读 README」被搜笔记抢走）——
-  if (wantsWorkspace) {
+  // —— 工作区读文件（routeIntent 已把 workspace 排在 knowledge 前）——
+  if (intent === 'workspace') {
     send({ type: 'step', index: 1 });
     const rel =
       last.match(/([\w./-]+\.(?:md|txt|ts|tsx|json))/)?.[1] ?? 'README.md'
@@ -356,7 +343,7 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
   }
 
   // —— 简易知识库 ——
-  if (wantsSearch) {
+  if (intent === 'knowledge') {
     send({ type: 'step', index: 1 });
     const id = 'mock_search_1';
     const args = JSON.stringify({ query: last });
@@ -383,6 +370,21 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
     }
     send({ type: 'done' });
     return;
+  }
+
+  // —— MCP 清单（intent 已把带 mcp 的问句收成 chat，这里直接读连接状态）——
+  if (/\bmcp\b/i.test(last)) {
+    const mcp = publicMcp()
+    const text = !mcp.enabled
+      ? '（mock）MCP 未启用。到「配置」页打开并填 URL。'
+      : !mcp.connected
+        ? `（mock）MCP 已启用但未连上${mcp.error ? `：${mcp.error}` : '。'}检查 URL / 鉴权后重试。`
+        : mcp.tools.length === 0
+          ? `（mock）已连接 ${mcp.url}，但 tools/list 为空。`
+          : `（mock）已连接 MCP（${mcp.url}），当前工具：\n${mcp.tools.map((n) => `- ${n}`).join('\n')}`
+    await streamText(text)
+    send({ type: 'done' })
+    return
   }
 
   // 都不匹配：提示怎么用
@@ -457,7 +459,9 @@ async function runLive(
   // 预加载 skill 会占掉第 1 步，返回值就是下一个可用编号
   const preloadStep = await preloadMatchedSkills(lastUser, history, send);
 
-  const tools = getToolDefinitions()
+  // 薄意图 → 工具白名单：明确是时间/工作区/知识库时收紧，chat 不收紧（含 MCP）
+  const intent = routeIntent(lastUser)
+  const tools = filterToolsByIntent(getToolDefinitions(), intent)
   const maxRounds = mcpToolDefinitions().length > 0 ? 6 : 4
   let step = preloadStep
   for (let round = 0; round < maxRounds; round += 1) {

@@ -275,6 +275,7 @@ async function searchNotes(query: string, userQuery?: string): Promise<string> {
       {
         hits: [],
         retrieval: mode,
+        cache: result.cache ?? 'miss',
         query: result.query,
         query_used: result.query_used,
         rewrite_terms: result.rewrite_terms,
@@ -291,6 +292,7 @@ async function searchNotes(query: string, userQuery?: string): Promise<string> {
   return JSON.stringify(
     {
       retrieval: mode,
+      cache: result.cache ?? 'miss',
       query: result.query,
       query_used: result.query_used,
       rewrite_terms: result.rewrite_terms,

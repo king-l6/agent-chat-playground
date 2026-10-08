@@ -25,6 +25,7 @@ import type {
   ChatCompletionTool,
 } from 'openai/resources/chat/completions'
 import { resolveLlmConfig } from './agent.js'
+import { wantsKnowledge } from './intent.js'
 import { DATA_DIR } from './paths.js'
 import { executeTool, getToolDefinitions } from './tools.js'
 import { getWorkspaceRoot, workspaceDigest, workspaceRead } from './workspace.js'
@@ -71,23 +72,11 @@ const REVIEW_TOOLS = [...WORKSPACE_READ_TOOLS]
 const SUMMARY_TOOLS: string[] = []
 
 /**
- * 「要不要查知识库」的意图识别（纯正则、零延迟）。
- *
- * 代码团队的任务几乎总是「看这个仓库 / 改这段代码」，那要走工作区工具，不是知识库。
- * 之前 explore 的白名单里常备 search_notes，模型接到「看下这个仓库怎么改」会先去查文档
- * 再读源码——用户报的正是这个。现在只有这句话本身就在问文档/知识库时才把
- * search_notes 放进去（分流口径对齐 agent.ts 规则 3/9：知识库 ≠ 已连接的代码库）。
- *
- * 为什么不用模型判意图：这里要分开的只是「读工作区」和「读知识库」两组工具，
- * 正则足够；多一次模型往返只会让演示现场不可复现。
- *
- * 注意：这只决定「要不要查文档」，和「改完之后要不要总结」是两件事——
- * 总结是固定跑的 summary 段，不由这句话决定。
+ * explore 要不要带 search_notes：交给 intent.wantsKnowledge。
+ * 「看这个仓库」会被判成 workspace，不会误开知识库；问周报/手册才会开。
  */
-const KNOWLEDGE_HINT = /知识库|文档|手册|wiki|周报|月报|纪要|简历|面经|学习路线|怎么学/i
-
 function exploreToolsFor(userTask: string): string[] {
-  return KNOWLEDGE_HINT.test(userTask)
+  return wantsKnowledge(userTask)
     ? [...WORKSPACE_READ_TOOLS, 'search_notes']
     : WORKSPACE_READ_TOOLS
 }

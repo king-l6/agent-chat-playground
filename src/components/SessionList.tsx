@@ -2,10 +2,33 @@ import { useMemo, useState } from 'react'
 import type { ChatSession } from '../sessionStore'
 import './SessionList.css'
 
-function day(ts: number) {
+const DAY_MS = 24 * 60 * 60 * 1000
+
+function pad(n: number) {
+  return String(n).padStart(2, '0')
+}
+
+/** 本地日历「今天 0 点」；whenLabel / bucketOf 共用，避免两处各算一遍对不齐 */
+function startOfLocalDay(d = new Date()) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+}
+
+function clock(ts: number) {
   const d = new Date(ts)
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+function dateLabel(ts: number) {
+  const d = new Date(ts)
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/** 今天 → 时分秒；昨天 → 昨天 时分秒；更早 → 日期 */
+function whenLabel(ts: number) {
+  const startOfToday = startOfLocalDay()
+  if (ts >= startOfToday) return clock(ts)
+  if (ts >= startOfToday - DAY_MS) return `昨天 ${clock(ts)}`
+  return dateLabel(ts)
 }
 
 /**
@@ -27,12 +50,10 @@ function preview(session: ChatSession) {
 
 /** 按「今天 / 昨天 / 近 7 天 / 更早」分组，对齐 DeepSeek 左侧列表的分段方式（同样只认提问时间） */
 function bucketOf(ts: number) {
-  const now = new Date()
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  const dayMs = 24 * 60 * 60 * 1000
+  const startOfToday = startOfLocalDay()
   if (ts >= startOfToday) return '今天'
-  if (ts >= startOfToday - dayMs) return '昨天'
-  if (ts >= startOfToday - 6 * dayMs) return '近 7 天'
+  if (ts >= startOfToday - DAY_MS) return '昨天'
+  if (ts >= startOfToday - 6 * DAY_MS) return '近 7 天'
   return '更早'
 }
 
@@ -85,6 +106,7 @@ export function SessionList(props: {
               {group.items.map((session) => {
                 const on = session.id === props.activeId
                 const busy = props.busyIds.has(session.id)
+                const askedAt = sortKey(session)
                 return (
                   <li key={session.id}>
                     <button
@@ -99,7 +121,9 @@ export function SessionList(props: {
                         <span className="sessions__row">
                           <strong>{session.title || '新对话'}</strong>
                           {/* 显示的也是提问日期，和排序键同一个字段，避免「排在这组但日期是那天」 */}
-                          <time>{busy ? '生成中' : day(sortKey(session))}</time>
+                          <time dateTime={new Date(askedAt).toISOString()}>
+                            {busy ? '生成中' : whenLabel(askedAt)}
+                          </time>
                         </span>
                         <span className="sessions__preview">{preview(session)}</span>
                       </span>

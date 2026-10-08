@@ -85,7 +85,7 @@ export type ManifestDoc = {
 type ManifestFile = { docs: ManifestDoc[] }
 
 /** 内置文档占用的 id，上传的 d_* 不能撞上 */
-const RESERVED_DOC_IDS = new Set(['project', 'handbook'])
+const RESERVED_DOC_IDS = new Set(['project', 'handbook', 'rag', 'agent', 'delivery', 'canvas'])
 
 /**
  * 8 字节随机 + 对照已有 id。
@@ -562,8 +562,9 @@ export function rewriteQuery(query: string): RewrittenQuery {
 }
 
 /**
- * 写死在代码里的项目说明（原来 DEMO_NOTES 的内容，改成 md 格式）
- * 这样问「技术栈 / SSE」即使不读手册也能命中
+ * 写死在代码里的内置知识（评测 + 线上 search_notes 同一套）。
+ * 原来只有「项目说明」一段，黄金集问来问去全是技术栈/求职手册——范围太窄。
+ * 按产品能力拆成多篇，评测才能覆盖 RAG / Agent / 交付 / 画布。
  */
 const BUILTIN_DOCS: Array<{ docId: string; title: string; body: string }> = [
   {
@@ -581,6 +582,80 @@ const BUILTIN_DOCS: Array<{ docId: string; title: string; body: string }> = [
       '',
       '## Tool calling',
       '模型返回 tool_calls 后，服务端执行本地工具，把结果写回 messages，再继续向模型要最终回答，UI 用卡片展示调用过程。',
+    ].join('\n'),
+  },
+  {
+    docId: 'rag',
+    title: 'RAG 检索说明',
+    body: [
+      '## 检索链路',
+      'search_notes 与画布「检索」节点共用一套：切块默认 maxChars=280、overlap=60 → 本地 BGE-small-zh 编码 → 向量与关键词 RRF 融合 → ngram 重排 → 命中块左右邻接拼给模型（small-to-big）。',
+      '',
+      '## 评测指标',
+      '用黄金集跑 npm run eval:rag。Recall@K 看正确答案是否落入 TopK；MRR 看正确答案排第几。对照通道依次为 vector、hybrid、rerank。',
+      '',
+      '## 引用规则',
+      '回答里的 [1][2] 是本轮 hits 的局部编号，不是全库永久 id。稳定身份看 hits[].id；跨文档定位靠 chunk.id。',
+      '',
+      '## 切块注意',
+      'Markdown 表和图片（含「图中文字」OCR 行）整块保留，不被字数窗口拦腰切断。普通散文才按窗口切。',
+      '',
+      '## 评测语料范围',
+      'eval 只切内置文档 + 求职补充手册，不掺 uploads，避免黄金集随用户上传飘。',
+    ].join('\n'),
+  },
+  {
+    docId: 'agent',
+    title: 'Agent 与工具说明',
+    body: [
+      '## 默认 Agent 循环',
+      'agent.ts 在 live 模式下多轮 tool calling：有 MCP 时 maxRounds 约 6，否则约 4。工具结果只在本轮 messages 里，跨轮不保留。',
+      '',
+      '## 本地工具',
+      '内置 get_current_time、calculator、search_notes、load_skill、工作区读写与 git 只读等。Skill 是磁盘 SKILL.md：目录常驻 system prompt，正文靠 load_skill 才注入。',
+      '',
+      '## MCP',
+      'mcp.ts 把 HTTP MCP 的 tools/list 转成 function calling。配置页可从 Claude 导入 URL/Cookie。交付泳道不调用 MCP。',
+      '',
+      '## 长期记忆',
+      'memory/ 用 markdown 存人可读记忆，向量在 memory-index.json。召回失败 fail-open，不阻断对话。',
+      '',
+      '## 代码团队模式',
+      '对话页勾选后 mode=code_team：固定 explore → implement → review → summary。仅 implement 可 workspace_write，且需用户 tool_approval 批准；高风险路径仍逐条拦。',
+    ].join('\n'),
+  },
+  {
+    docId: 'delivery',
+    title: '交付泳道说明',
+    body: [
+      '## 产品定位',
+      '本地 Agent 交付工作台：Electron 可选仓库，产研泳道带闸门。不是 Cursor，也不是 Dify。控制面是人点的确认 / 撤回 / 放行 / 签字。',
+      '',
+      '## 角色',
+      '交付页身份为产品 pm、研发 dev、评审 review、测试 qa。产品聊出 PRD 并勾验收后冻结；研发对着工作区改真实代码看 git diff；测试出意见、跑命令、签字。',
+      '',
+      '## 闸门',
+      '未勾验收不能交给研发；确认后正文冻住，撤回才解冻；带风险放行必须写理由。状态是人话，不会自己往前跳。',
+      '',
+      '## 工作区沙箱',
+      '路径逃出仓库根目录会被拒绝；git 工具只读，不会 checkout。网页与桌面共用 #/settings 填 API Key。',
+    ].join('\n'),
+  },
+  {
+    docId: 'canvas',
+    title: '编排画布说明',
+    body: [
+      '## 人画的流程',
+      '画布按边执行节点：检索 search、计算 calc、回答 answer 等。人画了就能走到的节点按 DAG 拓扑序全跑。',
+      '',
+      '## 分流',
+      '条件分流由人写死 if（例如问题里有没有算式）；分流节点在前端编译进 pipeline，不把 if 原文发给后端。',
+      '',
+      '## 存储',
+      '图只存拓扑到 localStorage（canvasStore），不存运行结果。用来对比「人编排」和「模型自己选工具」。',
+      '',
+      '## 与 RAG 的关系',
+      'RAG 不是第三种智能：它是能力，可挂在 Agent 的 search_notes 上，也可挂在画布检索节点上。',
     ].join('\n'),
   },
 ]
@@ -693,6 +768,16 @@ function chunkMarkdown(
   raw: string,
   fallbackTitle: string,
 ): KnowledgeChunk[] {
+  // wiki 路径当 fallback 时，块标题带上文件名，否则检索只看见「自动刷新」「前言」
+  const base =
+    fallbackTitle.includes('/') || fallbackTitle.endsWith('.md')
+      ? fallbackTitle.split(/[/\\]/).pop()!.replace(/\.md$/i, '')
+      : ''
+  const withFile = (sectionTitle: string) =>
+    base && sectionTitle !== fallbackTitle && !sectionTitle.startsWith(`${base} ·`)
+      ? `${base} · ${sectionTitle}`
+      : sectionTitle
+
   // 在「行首的 ## 」处切开，保留 ## 在每一段里
   const sections = raw.split(/\n(?=##\s+)/)
   const pieces: Array<{ title: string; text: string }> = []
@@ -704,7 +789,7 @@ function chunkMarkdown(
     const lines = trimmed.split('\n')
     // 第一行若是 ## xxx，则 xxx 当本节 title
     const heading = lines[0]?.match(/^##\s+(.+)$/)
-    const title = heading?.[1]?.trim() || fallbackTitle
+    const title = withFile(heading?.[1]?.trim() || fallbackTitle)
     // 有标题则正文从第二行起；否则整段都是正文
     const body = (heading ? lines.slice(1).join('\n') : trimmed).trim()
     if (!body) continue
@@ -861,16 +946,22 @@ export function searchChunks(
     .map((chunk) => {
       const title = chunk.title.toLowerCase()
       const text = chunk.text.toLowerCase()
+      const meta = getDocMetaMap().get(chunk.docId)
+      const docLabel = meta
+        ? `${meta.name} ${meta.path}`.toLowerCase()
+        : ''
       let score = 0
 
       // 整句匹配权重最高
       if (title.includes(q) || text.includes(q)) score += 10
+      if (docLabel && docLabel.includes(q)) score += 14
 
-      // 分词匹配：标题命中比正文命中分更高
+      // 分词匹配：文档名 > 标题 > 正文。短 token（如 nyx）容易误伤账号类文档，≥4 才给文档名高分
       for (const token of tokens) {
         if (token.length < 2) continue
         if (title.includes(token)) score += 6
         if (text.includes(token)) score += 2
+        if (docLabel.includes(token)) score += token.length >= 4 ? 10 : 3
       }
 
       return { chunk, score }
