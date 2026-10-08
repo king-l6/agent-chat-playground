@@ -6,6 +6,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { DATA_DIR } from './paths.js'
+import { currentUserId, userConfigFile } from './requestContext.js'
+import { userEnvGet } from './userEnv.js'
 
 export type LlmMode = 'mock' | 'live'
 
@@ -27,7 +29,9 @@ export type LlmSettingsPublic = {
   contextWindow: number
 }
 
-const FILE = path.join(DATA_DIR, 'llm.json')
+function llmFile() {
+  return userConfigFile('llm.json')
+}
 
 /**
  * 兜底窗口大小（token）：llm.json 和环境变量都没给时用。
@@ -63,10 +67,12 @@ export const DEFAULT_CONTEXT_WINDOW = 32_000
 export const MIN_CONTEXT_WINDOW = 1_000
 export const MAX_CONTEXT_WINDOW = 2_000_000
 
-let cached: LlmSettings | null = null
+const cachedByUser = new Map<string, LlmSettings>()
 
 function envKey() {
   return (
+    userEnvGet('OPENAI_API_KEY') ||
+    userEnvGet('ANTHROPIC_API_KEY') ||
     process.env.OPENAI_API_KEY?.trim() ||
     process.env.ANTHROPIC_API_KEY?.trim() ||
     ''
@@ -74,6 +80,10 @@ function envKey() {
 }
 
 function envBase() {
+  const openaiUser = userEnvGet('OPENAI_BASE_URL')
+  if (openaiUser) return openaiUser
+  const anthropicUser = userEnvGet('ANTHROPIC_BASE_URL').replace(/\/$/, '')
+  if (anthropicUser) return `${anthropicUser}/v1`
   const openaiBase = process.env.OPENAI_BASE_URL?.trim()
   const anthropicBase = process.env.ANTHROPIC_BASE_URL?.trim()?.replace(/\/$/, '')
   return openaiBase || (anthropicBase ? `${anthropicBase}/v1` : '')
@@ -146,7 +156,7 @@ function inferFromEnv(): LlmSettings {
 
 function readDisk(): LlmSettings | null {
   try {
-    const raw = JSON.parse(fs.readFileSync(FILE, 'utf8')) as Partial<LlmSettings>
+    const raw = JSON.parse(fs.readFileSync(llmFile(), 'utf8')) as Partial<LlmSettings>
     if (raw.mode !== 'mock' && raw.mode !== 'live') return null
     return {
       mode: raw.mode,
@@ -161,7 +171,12 @@ function readDisk(): LlmSettings | null {
 }
 
 export function getLlmSettings(): LlmSettings {
-  if (!cached) cached = readDisk() ?? inferFromEnv()
+  const id = currentUserId()
+  let cached = cachedByUser.get(id)
+  if (!cached) {
+    cached = readDisk() ?? inferFromEnv()
+    cachedByUser.set(id, cached)
+  }
   return cached
 }
 
@@ -211,9 +226,10 @@ export function saveLlmSettings(input: {
   if (next.mode === 'live' && !next.apiKey && !envKey()) {
     throw new Error('LIVE 需要 API Key')
   }
-  fs.mkdirSync(DATA_DIR, { recursive: true })
-  fs.writeFileSync(FILE, JSON.stringify(next, null, 2), 'utf8')
-  cached = next
+  const file = llmFile()
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, JSON.stringify(next, null, 2), 'utf8')
+  cachedByUser.set(currentUserId(), next)
   return publicLlmSettings(next)
 }
 

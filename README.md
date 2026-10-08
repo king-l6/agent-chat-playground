@@ -22,6 +22,8 @@
 
 内核还在：`#/` 问「现在几点了？」看工具卡片；`#/canvas` 对照「人画的流程」。`npm run eval:rag` 原 8 题不能坏。
 
+会话也进了路由：地址栏是 `#/c/<归属人>/<会话id>`，刷新能回到同一条；点会话行上的「分享」会把链接复制到剪贴板（同时把它设为可分享），别人打开是**只读**。后端每条 `/api/chat` 打 `[chat][<会话id>] start|done|error`，对链路时按这个前缀 grep 就能定位到具体会话。
+
 ## 三套机制（口述核心）
 
 ```
@@ -38,7 +40,7 @@ RAG 是能力（切块 / 向量 / 关键词 / 重排 / 引用），可以挂在 
 
 | 页 | 地址 | 实际做了什么 |
 |----|------|----------------|
-| 对话 | `#/` | SSE；工具卡片；`load_skill` 读 `server/skills/*/SKILL.md`；可停止 |
+| 对话 | `#/`、`#/c/<归属人>/<会话id>` | SSE；工具卡片；`load_skill` 读 `server/skills/*/SKILL.md`；可停止。会话存服务端（私密/可分享），链接可发给别人只读打开 |
 | 文档 | `#/documents` | 上传 md/txt，增量进索引 |
 | 向量库 | `#/vectors` | 看 chunk、向量是否已编码 |
 | 编排 | `#/canvas` | 沿边执行；计算器节点；DAG；条件分流；图存 localStorage（不存运行结果） |
@@ -97,6 +99,10 @@ xattr -cr "/Applications/Agent Chat Playground.app"
 - 无理由不能跳过评审或测试
 - 不是分布式向量库；画布分流是正则；图画在 localStorage
 - MCP 要本机填 URL/Cookie（或从 Claude 导入），安装包里不带公司凭证；交付泳道不调 MCP
+- **交付页的产物预览只支持 `npm run dev` / `electron:dev`**：预览要跨源隔离（COOP/COEP 响应头）才
+  能跑 WebContainer，而打包后的安装包走 `file://`，响应头带不了，`crossOriginIsolated` 恒为 false。
+  面板会显示这条边界并给出该用哪个命令，PRD / diff / 闸门全不受影响。另外沙箱启动要外网
+  （运行时来自 StackBlitz CDN、`npm install` 走 registry），不通就报分类错误 + 原始日志，不挡交付
 
 ## 目录
 

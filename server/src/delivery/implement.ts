@@ -243,6 +243,7 @@ FILE 相对路径
 规则：
 - 必须做出能用的功能：页面、路由、接口、前端入口都要写。禁止只加菜单/hash 交差。
 - 空目录也要从零新建。SEARCH 留空，REPLACE 写全文。
+- 新建前端项目时，除业务代码外必须同时产出可直接启动的工程文件：package.json、index.html、vite.config.ts、tsconfig.json，以及入口 src/main.tsx。入口里 import 的必须是本次真实创建的文件。缺任何一项都算没做完。
 - 没有的文件就新建。缺的目录不用先建，直接写 dir/file.ts。
 - SEARCH 从下面原文抄。对不上就 SEARCH 留空、REPLACE 写该文件全文。
 - 不要加评测题，不要只改 eval-cases.ts。

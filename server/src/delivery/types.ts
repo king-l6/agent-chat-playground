@@ -48,6 +48,8 @@ export type Patch = {
   files: string[]
   status?: string
   diff?: string
+  /** 本轮由脚手架兜底补齐的工程文件（模型自己写全了就没有这个字段） */
+  scaffold?: { written: string[]; missingBefore: string[] }
 }
 export type ReviewComment = { path: string; risk: string; mustFix: boolean }
 export type Review = { comments: ReviewComment[]; riskReason?: string }
@@ -81,6 +83,10 @@ export type GateEvent = {
 
 export type DeliveryRun = {
   id: string
+  /** 这条需求对着哪个本地仓库；缺省回落全局默认工作区 */
+  workspaceRoot?: string
+  createdAt?: string
+  updatedAt?: string
   seat: Seat
   phase: Phase
   stale: boolean
@@ -94,6 +100,24 @@ export type DeliveryRun = {
   talk: TalkTurn[]
   lastErrors?: string[]
   gates: GateEvent[]
+}
+
+/** 磁盘上的交付状态：一组需求 + 当前激活哪条 */
+export type DeliveryStore = {
+  version: 2
+  activeId: string
+  runs: DeliveryRun[]
+}
+
+/** 需求列表用的轻量摘要，不带 talk/patch 这些大块 */
+export type RunSummary = {
+  id: string
+  title: string
+  phase: Phase
+  seat: Seat
+  workspaceRoot?: string
+  signed: boolean
+  updatedAt?: string
 }
 
 export class GateError extends Error {

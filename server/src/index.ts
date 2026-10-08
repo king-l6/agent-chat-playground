@@ -16,6 +16,16 @@ import {
   reconnectMcp,
   saveMcpSettings,
 } from './mcp.js'
+import { currentUserId, parseUserId, runWithUser } from './requestContext.js'
+import { publicUserEnv, saveUserEnv } from './userEnv.js'
+import {
+  deleteSession,
+  getSession,
+  isValidId,
+  listSessions,
+  upsertSession,
+  type SessionVisibility,
+} from './sessions.js'
 import {
   publicLlmSettings,
   resolveContextWindow,
@@ -24,9 +34,14 @@ import {
 } from './settings.js'
 import { IMAGE_ROUTE, imageFileById, isImageId, mimeOf } from './imageCache.js'
 import {
+  activateRun,
   applyGate,
+  bindRunWorkspace,
   changeSeat,
+  deleteDeliveryRun,
   publicDelivery,
+  publicDeliveryArtifacts,
+  publicRuns,
   runDeliveryTurn,
   startNewRun,
   updatePrd,
@@ -56,8 +71,10 @@ import {
   startWikiIngest,
 } from './retrieve.js'
 import type { ChatMessageInput, SseEvent } from './types.js'
-import { browseDisk, getWorkspaceRoot, setWorkspaceRoot, suggestedHere } from './workspace.js'
+import { pickFolderNative } from './nativePick.js'
+import { getWorkspaceRoot, setWorkspaceRoot, suggestedHere } from './workspace.js'
 import { REPO_ROOT } from './paths.js'
+import { appendChatTrace, shortId, type ChatTrace } from './trace.js'
 import { getWikiRoot, listWikiTree, readWikiDoc } from './wiki.js'
 import {
   MEMORY_TYPES,
@@ -100,8 +117,17 @@ app.use(
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   }),
 )
-// 解析 JSON body，限制 1MB
-app.use(express.json({ limit: '1mb' }))
+/*
+ * 解析 JSON body。
+ * 上限从 1MB 提到 8MB：PUT /api/sessions/:id 会把整条会话（含工具结果里的文件片段）
+ * 一次性传上来，长会话 / 代码团队会话用 1MB 会 413。其余接口的 body 都很小。
+ */
+app.use(express.json({ limit: '8mb' }))
+
+/** 多用户：用请求头区分各自的 llm / mcp / 环境变量配置 */
+app.use((req, _res, next) => {
+  runWithUser(parseUserId(req.header('x-playground-user')), next)
+})
 
 ensureDataDirs()
 
@@ -654,6 +680,33 @@ app.put('/api/settings', (req, res) => {
   }
 })
 
+app.get('/api/env', (_req, res) => {
+  res.json(publicUserEnv())
+})
+
+app.put('/api/env', async (req, res) => {
+  const rows = Array.isArray(req.body?.vars) ? req.body.vars : null
+  if (!rows) {
+    res.status(400).json({ error: '需要 vars: [{ key, value?, keep? }]' })
+    return
+  }
+  try {
+    const saved = saveUserEnv(
+      rows.map((row: { key?: unknown; value?: unknown; keep?: unknown }) => ({
+        key: typeof row?.key === 'string' ? row.key : '',
+        value: typeof row?.value === 'string' ? row.value : undefined,
+        keep: row?.keep === true,
+      })),
+    )
+    // Cookie 等变了要重连 MCP
+    if (publicMcp().enabled) await reconnectMcp()
+    res.json(saved)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: message })
+  }
+})
+
 app.get('/api/mcp', (_req, res) => {
   res.json(publicMcp())
 })
@@ -689,6 +742,12 @@ app.post('/api/mcp/import-claude', async (_req, res) => {
 
 function parseSeat(raw: unknown): Seat | null {
   return raw === 'pm' || raw === 'dev' || raw === 'qa' ? raw : null
+}
+
+/** 需求 id；缺省（没传/不合法）由 store 回落到当前激活那条 */
+function parseRunId(raw: unknown): string | undefined {
+  const s = typeof raw === 'string' ? raw.trim() : ''
+  return /^[a-z0-9][a-z0-9-]{0,63}$/i.test(s) ? s : undefined
 }
 
 app.get('/api/video', (_req, res) => {
@@ -982,10 +1041,69 @@ app.get('/api/video/tasks/:id/film', (req, res) => {
   res.sendFile(file)
 })
 
-app.get('/api/delivery', (_req, res) => {
+app.get('/api/delivery', (req, res) => {
+  res.json(publicDelivery(parseRunId(req.query?.id)))
+})
+
+/** 预览用的产物包。可能很大（几百个文件），所以单独一条，不塞进 /api/delivery */
+app.get('/api/delivery/artifacts', (req, res) => {
+  try {
+    res.json(publicDeliveryArtifacts(parseRunId(req.query?.id)))
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+app.get('/api/delivery/runs', (_req, res) => {
+  res.json(publicRuns())
+})
+
+app.post('/api/delivery/runs', (req, res) => {
+  const root = typeof req.body?.workspaceRoot === 'string' ? req.body.workspaceRoot : undefined
+  try {
+    startNewRun(root ? { workspaceRoot: root } : undefined)
+    res.json(publicDelivery())
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+app.post('/api/delivery/runs/activate', (req, res) => {
+  const id = parseRunId(req.body?.id)
+  if (!id) {
+    res.status(400).json({ error: '缺少 id' })
+    return
+  }
+  activateRun(id)
   res.json(publicDelivery())
 })
 
+app.post('/api/delivery/runs/delete', (req, res) => {
+  const id = parseRunId(req.body?.id)
+  if (!id) {
+    res.status(400).json({ error: '缺少 id' })
+    return
+  }
+  deleteDeliveryRun(id)
+  res.json(publicDelivery())
+})
+
+app.put('/api/delivery/runs/workspace', (req, res) => {
+  const id = parseRunId(req.body?.id)
+  if (!id) {
+    res.status(400).json({ error: '缺少 id' })
+    return
+  }
+  const root = typeof req.body?.root === 'string' ? req.body.root : undefined
+  try {
+    bindRunWorkspace(id, root)
+    res.json(publicDelivery(id))
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+// 老前端仍在调；语义变成「新开一条需求」，不再覆盖当前那条
 app.post('/api/delivery/reset', (_req, res) => {
   startNewRun()
   res.json(publicDelivery())
@@ -997,24 +1115,29 @@ app.put('/api/delivery/seat', (req, res) => {
     res.status(400).json({ error: 'seat 必须是 pm / dev / qa' })
     return
   }
-  changeSeat(seat)
-  res.json(publicDelivery())
+  changeSeat(seat, parseRunId(req.body?.id))
+  res.json(publicDelivery(parseRunId(req.body?.id)))
 })
 
 app.put('/api/delivery/prd', (req, res) => {
   const actor = parseSeat(req.body?.actor)
+  const id = parseRunId(req.body?.id)
   if (!actor) {
     res.status(400).json({ error: 'actor 必须是 pm / dev / qa' })
     return
   }
   try {
-    updatePrd(actor, {
-      title: typeof req.body?.title === 'string' ? req.body.title : undefined,
-      oneLiner: typeof req.body?.oneLiner === 'string' ? req.body.oneLiner : undefined,
-      body: typeof req.body?.body === 'string' ? req.body.body : undefined,
-      acceptance: Array.isArray(req.body?.acceptance) ? req.body.acceptance : undefined,
-    })
-    res.json(publicDelivery())
+    updatePrd(
+      actor,
+      {
+        title: typeof req.body?.title === 'string' ? req.body.title : undefined,
+        oneLiner: typeof req.body?.oneLiner === 'string' ? req.body.oneLiner : undefined,
+        body: typeof req.body?.body === 'string' ? req.body.body : undefined,
+        acceptance: Array.isArray(req.body?.acceptance) ? req.body.acceptance : undefined,
+      },
+      id,
+    )
+    res.json(publicDelivery(id))
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     res.status(err instanceof GateError ? 400 : 500).json({
@@ -1027,16 +1150,22 @@ app.put('/api/delivery/prd', (req, res) => {
 app.post('/api/delivery/gate', (req, res) => {
   const actor = parseSeat(req.body?.actor)
   const action = req.body?.action as GateAction
+  const id = parseRunId(req.body?.id)
   if (!actor) {
     res.status(400).json({ error: 'actor 必须是 pm / dev / qa' })
     return
   }
   try {
-    applyGate(actor, action, {
-      reason: typeof req.body?.reason === 'string' ? req.body.reason : undefined,
-      questions: Array.isArray(req.body?.questions) ? req.body.questions.map(String) : undefined,
-    })
-    res.json(publicDelivery())
+    applyGate(
+      actor,
+      action,
+      {
+        reason: typeof req.body?.reason === 'string' ? req.body.reason : undefined,
+        questions: Array.isArray(req.body?.questions) ? req.body.questions.map(String) : undefined,
+      },
+      id,
+    )
+    res.json(publicDelivery(id))
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     res.status(err instanceof GateError ? 400 : 500).json({
@@ -1049,6 +1178,7 @@ app.post('/api/delivery/gate', (req, res) => {
 app.post('/api/delivery/turn', async (req, res) => {
   const actor = parseSeat(req.body?.actor)
   const message = typeof req.body?.message === 'string' ? req.body.message : ''
+  const id = parseRunId(req.body?.id)
   if (!actor) {
     res.status(400).json({ error: 'actor 必须是 pm / dev / qa' })
     return
@@ -1073,7 +1203,7 @@ app.post('/api/delivery/turn', async (req, res) => {
   }
   send({ type: 'text_delta', delta: '研发回合已接上。\n' })
   try {
-    await runDeliveryTurn(actor, message, send)
+    await runDeliveryTurn(actor, message, send, id)
   } catch (err) {
     const messageText = err instanceof Error ? err.message : String(err)
     if (err instanceof GateError) {
@@ -1091,13 +1221,16 @@ app.get('/api/workspace', (_req, res) => {
   res.json({ root: getWorkspaceRoot(), here: suggestedHere() })
 })
 
-app.get('/api/workspace/browse', (req, res) => {
-  const dir = typeof req.query.dir === 'string' ? req.query.dir : ''
+/**
+ * 弹系统目录选择器，只返回选中的路径（不落任何状态，调用方自己决定绑到哪儿）。
+ * 阻塞到用户选完或取消；取消返回 { root: null }。
+ */
+app.post('/api/workspace/pick', async (req, res) => {
+  const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.slice(0, 40) : '选择目录'
   try {
-    res.json(browseDisk(dir || undefined))
+    res.json({ root: await pickFolderNative(prompt) })
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(400).json({ error: message })
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
   }
 })
 
@@ -1384,6 +1517,82 @@ app.post('/api/workflow/run', async (req, res) => {
 })
 
 /**
+ * 会话存取（见 sessions.ts）。
+ *
+ * 会话永远是「归属人自己的」：写入一律落在 currentUserId() 名下，
+ * **不接受代写别人的会话**；读取时只有归属人本人、或对方把这条设为 shared，才放行。
+ *
+ *   GET    /api/sessions                 列自己的会话（含 messages，前端一次拉全量）
+ *   GET    /api/sessions/:ownerId/:id    按归属人读 —— 分享链接 #/c/<ownerId>/<id> 走这条
+ *   PUT    /api/sessions/:id             落盘一条（owner = 自己）
+ *   DELETE /api/sessions/:id             删一条（owner = 自己）
+ */
+
+/** 把 PUT 上来的 body 收成一条会话。ownerId 用当前用户，**忽略 body 里的 ownerId**（否则能代写别人） */
+function sessionFromBody(req: express.Request, ownerId: string, id: string) {
+  const body = (req.body ?? {}) as Record<string, unknown>
+  return {
+    id,
+    ownerId,
+    title: typeof body.title === 'string' ? body.title : '新对话',
+    lastUserAt: typeof body.lastUserAt === 'number' ? body.lastUserAt : Date.now(),
+    updatedAt: typeof body.updatedAt === 'number' ? body.updatedAt : Date.now(),
+    visibility: (body.visibility === 'shared' ? 'shared' : 'private') as SessionVisibility,
+    messages: Array.isArray(body.messages) ? body.messages : [],
+  }
+}
+
+app.get('/api/sessions', (_req, res) => {
+  res.json({ sessions: listSessions(currentUserId()) })
+})
+
+app.get('/api/sessions/:ownerId/:id', (req, res) => {
+  const { ownerId, id } = req.params
+  if (!isValidId(ownerId) || !isValidId(id)) {
+    res.status(400).json({ error: 'id 不合法' })
+    return
+  }
+  const session = getSession(ownerId, id)
+  if (!session) {
+    res.status(404).json({ error: '会话不存在' })
+    return
+  }
+  /*
+   * 别人的会话：只有设成 shared 才可读，否则 403。
+   * 这里用 403 而不是 404，是为了让「分享链接打不开」的人看到「对方未分享」，
+   * 而不是含糊的「不存在」——本地单机场景，不值得为防探测牺牲可诊断性。
+   */
+  if (ownerId !== currentUserId() && session.visibility !== 'shared') {
+    res.status(403).json({ error: '对方未分享这条会话' })
+    return
+  }
+  res.json({ session })
+})
+
+app.put('/api/sessions/:id', (req, res) => {
+  const id = req.params.id
+  if (!isValidId(id)) {
+    res.status(400).json({ error: 'id 不合法' })
+    return
+  }
+  try {
+    const saved = upsertSession(sessionFromBody(req, currentUserId(), id))
+    res.json({ ok: true, session: saved })
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+app.delete('/api/sessions/:id', (req, res) => {
+  const id = req.params.id
+  if (!isValidId(id)) {
+    res.status(400).json({ error: 'id 不合法' })
+    return
+  }
+  res.json({ ok: deleteSession(currentUserId(), id) })
+})
+
+/**
  * POST /api/chat：开一条 SSE，把 Agent 事件不断 write 给前端
  * Content-Type: text/event-stream
  */
@@ -1400,6 +1609,11 @@ app.post('/api/chat', async (req, res) => {
    * 高风险文件（.env / 密钥 / CI）后端仍会拦，见 codeTeam.canAutoApprove。
    */
   const autoApprove = req.body?.autoApprove === true
+  /*
+   * 会话 id：标记「这一轮属于哪个会话」，供按 [chat][<sid>] 查链路。
+   * 不合法 / 没带就是空串——老前端、脚本调用都不会因此报错。
+   */
+  const sid = isValidId(req.body?.sessionId) ? (req.body.sessionId as string) : ''
 
   // 只保留合法 user/assistant，并截断过长 content，防滥用
   const normalized = messages
@@ -1427,12 +1641,29 @@ app.post('/api/chat', async (req, res) => {
     abort.abort()
   })
 
+  /*
+   * trace 旁路采集：只观察流过的 SSE 事件，不参与对话逻辑（见 trace.ts）。
+   * tools 收 tool_start 的 name，model 收 meta.model，error 收 error.message。
+   */
+  const traceTools: string[] = []
+  let traceModel: string | undefined
+  let traceError: string | undefined
+
   /** 写一条 SSE：data: {...}\n\n */
   const send = (event: SseEvent) => {
+    if (event.type === 'tool_start') traceTools.push(event.name)
+    else if (event.type === 'meta') traceModel = event.model
+    else if (event.type === 'error') traceError = event.message
     if (closed || res.writableEnded) return
     res.write(`data: ${JSON.stringify(event)}\n\n`)
   }
 
+  /*
+   * 链路日志：按 [chat][<sid>] 前缀过滤，就能捞出某个会话的全部回合。
+   * 界面显示的短 id、URL 里的 id 与这里的 sid 必须是同一个值。
+   */
+  console.log('[chat][%s] start mode=%s messages=%d', sid || '-', chatMode, normalized.length)
+  const startedAt = Date.now()
   try {
     if (chatMode === 'code_team') {
       await runCodeTeamChat({
@@ -1440,16 +1671,33 @@ app.post('/api/chat', async (req, res) => {
         send,
         signal: abort.signal,
         autoApprove,
+        sessionId: sid,
       })
     } else {
-      await runAgentChat({ messages: normalized, send })
+      await runAgentChat({ messages: normalized, send, sessionId: sid })
     }
+    console.log('[chat][%s] done %dms', sid || '-', Date.now() - startedAt)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    traceError = message
+    console.log('[chat][%s] error %dms %s', sid || '-', Date.now() - startedAt, message)
     send({ type: 'error', message })
     send({ type: 'done' })
   } finally {
     if (!closed) res.end()
+    // trace 落盘：一行 JSONL，fail-open（trace.ts 内部吞异常），不影响已结束的响应
+    const trace: ChatTrace = {
+      ts: new Date().toISOString(),
+      sessionId: sid || shortId(),
+      mode: chatMode,
+      model: traceModel,
+      tools: traceTools,
+      durationMs: Date.now() - startedAt,
+      turns: normalized.filter((m) => m.role === 'user').length,
+      ok: !traceError,
+      error: traceError,
+    }
+    appendChatTrace(trace)
   }
 })
 
@@ -1700,13 +1948,15 @@ export function startServer(): Promise<void> {
       } catch (err) {
         console.warn('[video] 恢复中断任务失败:', err instanceof Error ? err.message : err)
       }
-      void reconnectMcp().then((mcp) => {
-        if (!mcp.enabled) return
-        if (mcp.connected) {
-          console.log(`[mcp] ${mcp.tools.length} tools @ ${mcp.url}`)
-        } else {
-          console.warn('[mcp] 未连上:', mcp.error)
-        }
+      runWithUser('local', () => {
+        void reconnectMcp().then((mcp) => {
+          if (!mcp.enabled) return
+          if (mcp.connected) {
+            console.log(`[mcp] ${mcp.tools.length} tools @ ${mcp.url}`)
+          } else {
+            console.warn('[mcp] 未连上:', mcp.error)
+          }
+        })
       })
       resolve()
     })

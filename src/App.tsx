@@ -22,12 +22,23 @@ import { AppSidebar } from './components/AppSidebar';
 import { SessionList } from './components/SessionList';
 import {
   blankSession,
-  loadSessions,
-  saveSessions,
+  hydrate,
+  loadCached,
+  reconcile,
+  saveCached,
   sessionTitle,
+  toPayload,
   uid,
   type ChatSession,
 } from './sessionStore';
+import {
+  deleteRemoteSession,
+  fetchSharedSession,
+  listSessions,
+  saveSession,
+  sessionErrorText,
+} from './api/sessions';
+import { getUserId } from './lib/userProfile';
 import './components/AppShell.css';
 
 /** 输入框自动长高的上限（px）。和 AppShell.css 里 .composer textarea 的 max-height 必须一致 */
@@ -74,8 +85,25 @@ function pageFromHash(): 'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' 
   return 'chat'
 }
 
+/**
+ * 从 hash 解出「要打开哪个会话」。
+ * 形如 #/c/<ownerId>/<sessionId>；也容忍只有 #/c/<sessionId>（没带归属人的老链接，owner 视为自己）。
+ * 用 /i 且统一转小写：id 生成时本就是小写，手输链接大小写混了也不至于打不开。
+ */
+function sessionRouteFromHash(): { ownerId: string; id: string } | null {
+  const path = location.hash.replace(/^#\/?/, '').split('?')[0]
+  const m = /^c\/([a-z0-9][a-z0-9_-]*)(?:\/([a-z0-9][a-z0-9_-]*))?$/i.exec(path)
+  if (!m) return null
+  return m[2]
+    ? { ownerId: m[1].toLowerCase(), id: m[2].toLowerCase() }
+    : { ownerId: getUserId(), id: m[1].toLowerCase() }
+}
+
 export default function App() {
-  const [boot] = useState(loadSessions);
+  /** 当前用户 id（= 会话归属人）。启动读一次就够，改它本来就要刷新页面 */
+  const me = useMemo(() => getUserId(), []);
+  /** 首帧先拿 localStorage 缓存渲染（秒开），服务端结果回来后覆盖，见下面 loadFromServer 的 effect */
+  const [boot] = useState(loadCached);
   const [sessions, setSessions] = useState<ChatSession[]>(() => boot.sessions);
   const [activeId, setActiveId] = useState(() => boot.activeId);
   /** 各会话自己的草稿，切换时不丢 */
@@ -95,6 +123,17 @@ export default function App() {
   /** 顶部/底部错误条 */
   const [error, setError] = useState<string>('');
   const [codeTeam, setCodeTeam] = useState(() => localStorage.getItem('agentos.codeTeam') === '1');
+  /**
+   * 正在看的**别人**分享的会话。null = 看的是自己的会话。
+   * 只读态：输入框禁用、进不了 onSend，顶栏挂一条只读横幅。
+   *
+   * 别人的会话单独存这一份、**不并进 sessions**：sessions 的语义是「我自己的会话」，
+   * 并进去的话持久化 effect 会把它 PUT 成我的副本、删会话时还会连带删掉别人的。
+   */
+  const [viewerOwner, setViewerOwner] = useState<string | null>(null);
+  const [sharedSession, setSharedSession] = useState<ChatSession | null>(null);
+  /** 一次性提示（链接已复制 / 打开失败），几秒后自动消失 */
+  const [toast, setToast] = useState('');
   /**
    * 上下文窗口（token）＝用量环的分母。
    * 真值从 /api/health 的 contextWindow 来（后端 settings.resolveContextWindow 算好的）；
@@ -119,8 +158,13 @@ export default function App() {
   const stickBottom = useRef(true);
   /** 输入框本体：自动长高要直接改它的 style.height */
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  /** 「我的」当前会话。草稿、发送、busyIds 都认它 */
   const active = sessions.find((s) => s.id === activeId) ?? sessions[0];
-  const messages = active?.messages ?? [];
+  /** 只读态：正在看别人分享的会话 */
+  const readonly = viewerOwner != null;
+  /** 实际渲染出来的会话：只读态是别人那条，否则是自己的当前会话 */
+  const viewing = readonly ? sharedSession : active;
+  const messages = viewing?.messages ?? [];
   const input = active ? (drafts[active.id] ?? '') : '';
   const activeBusy = active ? busyIds.has(active.id) : false;
   /**
@@ -151,11 +195,115 @@ export default function App() {
    */
   const contextWarn = contextWarnOf(contextUsed, windowTokens);
 
+  /** 每渲染同步一次快照。effect 里读 snap.current 就不会踩到闭包里的旧值 */
+  const snap = useRef({ activeId, sessions })
+  snap.current = { activeId, sessions }
+  /**
+   * 已经推给服务端的会话（按 id 存**对象引用**）。
+   * 会话是整条不可变更新的：某条没动过时引用不变，据此跳过重复 PUT——
+   * 不然每来一个 token 都会把所有会话重推一遍。
+   */
+  const pushedRef = useRef(new Map<string, ChatSession>())
+
+  /** 落盘一条到服务端。失败不打扰界面：localStorage 缓存里还在，下次启动合并时会补推 */
+  function persistOne(s: ChatSession) {
+    return saveSession(toPayload(s)).catch((err) => {
+      console.warn('[sessions] 保存失败：%s', sessionErrorText(err, '保存失败'))
+    })
+  }
+
+  /**
+   * 拉自己的会话列表，和本地缓存合并。
+   * 合并是**并集**且同 id 取 updatedAt 新的那条：localStorage 是写后缓存，
+   * 关页/崩溃前来不及 PUT 的改动只存在本地，无脑用服务端就把它丢了；
+   * 本地较新的那几条这一步会补推上去。
+   */
+  async function refreshOwnSessions() {
+    let merged: ChatSession[]
+    try {
+      const remote = (await listSessions()).map(hydrate)
+      const result = reconcile(snap.current.sessions, remote)
+      merged = result.merged
+      // 先登记再推，避免推完之后下面的防抖 effect 又推一遍
+      for (const s of merged) pushedRef.current.set(s.id, s)
+      for (const s of result.push) void persistOne(s)
+    } catch {
+      // 服务端不可达：保留缓存内容，不弹错——离线也要能用
+      return
+    }
+    setSessions(merged.length > 0 ? merged : [blankSession()])
+  }
+
+  /**
+   * 打开别人分享的会话（只读）。
+   * 对方没分享（403）/ 不存在（404）时给提示并退回自己的会话，别把用户卡在空页面上。
+   */
+  async function openShared(ownerId: string, id: string) {
+    try {
+      setSharedSession(hydrate(await fetchSharedSession(ownerId, id)))
+      setViewerOwner(ownerId)
+      setError('')
+    } catch (err) {
+      setViewerOwner(null)
+      setSharedSession(null)
+      setError(sessionErrorText(err, '打开分享的会话失败'))
+      writeHash(snap.current.activeId)
+    }
+  }
+
+  /** 把地址栏写成「我在看的会话」。已经是就不写，免得白白触发一次 hashchange */
+  function writeHash(id: string) {
+    if (!id) return
+    const next = `#/c/${me}/${id}`
+    if (location.hash === next) return
+    location.hash = next
+  }
+
+  /*
+   * hash → state。
+   * 除了切页面，还要处理 #/c/<owner>/<id>：是自己的会话就切过去（本地没有就补拉一次），
+   * 是别人的就拉下来进只读态。挂载时手动调一次——直接打开分享链接不会触发 hashchange。
+   */
   useEffect(() => {
-    const onHash = () => setPage(pageFromHash());
-    window.addEventListener('hashchange', onHash);
-    return () => window.removeEventListener('hashchange', onHash);
-  }, []);
+    const applyHash = () => {
+      setPage(pageFromHash())
+      const route = sessionRouteFromHash()
+      if (!route) return
+      if (route.ownerId !== me) {
+        void openShared(route.ownerId, route.id)
+        return
+      }
+      setViewerOwner(null)
+      setSharedSession(null)
+      setActiveId(route.id)
+      if (!snap.current.sessions.some((s) => s.id === route.id)) {
+        void refreshOwnSessions() // 换浏览器/清缓存后只留了链接：从服务端补回来
+      }
+    }
+    window.addEventListener('hashchange', applyHash)
+    applyHash()
+    return () => window.removeEventListener('hashchange', applyHash)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /* 首帧渲染完再拉服务端，和缓存合并。缓存让首屏不空，服务端保证跨浏览器一致 */
+  useEffect(() => {
+    void refreshOwnSessions()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /* state → hash：在会话页时地址栏始终指向当前会话，方便刷新 / 收藏 / 复制 */
+  useEffect(() => {
+    if (page !== 'chat' || readonly) return
+    writeHash(active?.id ?? '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, readonly, active?.id])
+
+  useEffect(() => {
+    if (!toast) return
+    const timer = window.setTimeout(() => setToast(''), 3200)
+    return () => window.clearTimeout(timer)
+  }, [toast])
 
   useEffect(() => {
     localStorage.setItem('agentos.rail', collapsed ? '1' : '0')
@@ -171,23 +319,48 @@ export default function App() {
     }
   }, [sessions, activeId])
 
-  const snap = useRef({ activeId, sessions })
-  snap.current = { activeId, sessions }
-
   useEffect(() => {
-    const flush = () => saveSessions(snap.current.activeId, snap.current.sessions)
+    const flush = () => {
+      saveCached(snap.current.activeId, snap.current.sessions)
+      // 尽力补推一把。没推完也不要紧：下次启动 refreshOwnSessions 的合并会兜住
+      for (const s of snap.current.sessions) {
+        if (pushedRef.current.get(s.id) !== s) void persistOne(s)
+      }
+    }
     window.addEventListener('pagehide', flush)
     return () => {
       window.removeEventListener('pagehide', flush)
       flush()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /*
+   * 防抖持久化：本地缓存立刻写（便宜、不会失败），服务端 PUT 等 300ms 静默——
+   * 流式时每个 token 都会改 sessions，不防抖就是每个 token 一次网络写。
+   * 连续吐字超过 300ms 的话这一轮要等停下来才落盘，收尾靠 pagehide / 下次启动合并兜底。
+   */
   useEffect(() => {
+    saveCached(snap.current.activeId, snap.current.sessions)
     const timer = window.setTimeout(() => {
-      saveSessions(snap.current.activeId, snap.current.sessions)
+      const current = snap.current.sessions
+      const pushed = pushedRef.current
+      const seen = new Set<string>()
+      for (const s of current) {
+        seen.add(s.id)
+        if (pushed.get(s.id) === s) continue // 引用没变 = 这条没动过
+        pushed.set(s.id, s)
+        void persistOne(s)
+      }
+      // 本地删掉的，服务端跟着删
+      for (const id of [...pushed.keys()]) {
+        if (seen.has(id)) continue
+        pushed.delete(id)
+        void deleteRemoteSession(id).catch(() => {})
+      }
     }, 300)
     return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, sessions])
 
   /*
@@ -476,10 +649,12 @@ export default function App() {
   }
 
   function openSession() {
+    // 从「别人分享的只读会话」回来：不退出只读的话，新建/切换都打不开自己的会话
+    setViewerOwner(null)
+    setSharedSession(null)
     const empty = sessions.find((s) => s.messages.length === 0 && !busyIds.has(s.id))
     if (empty) {
       setActiveId(empty.id)
-      saveSessions(empty.id, sessions)
       setError('')
       return
     }
@@ -487,18 +662,50 @@ export default function App() {
     const next = [created, ...sessions]
     setSessions(next)
     setActiveId(created.id)
-    saveSessions(created.id, next)
     setError('')
   }
 
   function removeSession(id: string) {
     abortSession(id)
+    if (activeId === id) {
+      setViewerOwner(null)
+      setSharedSession(null)
+    }
     const rest = sessions.filter((s) => s.id !== id)
     const next = rest.length > 0 ? rest : [blankSession()]
     const nextActive = activeId === id ? next[0].id : activeId
     setSessions(next)
     setActiveId(nextActive)
-    saveSessions(nextActive, next)
+  }
+
+  /**
+   * 分享一条会话。
+   *
+   * 先把可见性置成 shared —— 私密会话别人打开是 403，链接发出去也是打不开的。
+   * 再把链接写进剪贴板；clipboard API 在非安全上下文 / 权限被拒时会失败，退回 prompt 展示。
+   */
+  async function onShare(id: string) {
+    const target = sessions.find((s) => s.id === id)
+    if (!target) return
+    if (target.visibility !== 'shared') {
+      const next: ChatSession = { ...target, visibility: 'shared' }
+      setSessions((prev) => prev.map((s) => (s.id === id ? next : s)))
+      try {
+        pushedRef.current.set(id, next) // 这条算已推过，免得防抖 effect 再推一次
+        await saveSession(toPayload(next))
+      } catch (err) {
+        setError(sessionErrorText(err, '设为可分享失败'))
+        return
+      }
+    }
+    // 用 href 而不是拼 origin：Electron 里页面是 file:// 加载的，origin 是字符串 'null'
+    const url = `${location.href.split('#')[0]}#/c/${me}/${id}`
+    try {
+      await navigator.clipboard.writeText(url)
+      setToast('链接已复制（已设为可分享）')
+    } catch {
+      window.prompt('复制这条链接分享给别人：', url)
+    }
   }
 
   /**
@@ -514,6 +721,8 @@ export default function App() {
    * @param text 可选：快捷提示按钮传入；不传则用输入框
    */
   async function onSend(text?: string) {
+    // 只读态（在看别人分享的会话）不该发问。输入框已经禁用，这里再兜一道
+    if (readonly) return
     const sessionId = active?.id
     if (!sessionId) return
     const content = (text ?? input).trim();
@@ -563,7 +772,6 @@ export default function App() {
           messages: nextMessages,
         }
       })
-      saveSessions(sessionId, next)
       return next
     })
 
@@ -575,6 +783,8 @@ export default function App() {
         messages: toApiMessages([...prior, userMsg]),
         mode: codeTeam ? 'code_team' : 'default',
         signal: controller.signal,
+        // 后端只用它打链路日志（[chat][<sid>]），不参与对话逻辑
+        sessionId,
         onEvent: (event) => handleEvent(sessionId, assistantId, event),
       });
       patchAssistant(sessionId, assistantId, (m) =>
@@ -725,6 +935,30 @@ export default function App() {
   const talk = (
     <div className="app__talk">
       <main className="main" ref={mainRef} onScroll={onMainScroll}>
+        {/*
+         * 会话头：显示当前会话 id（和后端 [chat][<sid>] 日志、URL 里的 id 是同一个值），
+         * 归属人这一侧还给一颗「复制链接」。短 id 只取前 8 位，够对上日志又不占地方。
+         */}
+        {viewing && (
+          <div className="chat-head">
+            <span className="chat-head__id" title={`完整会话 id：${viewing.id}`}>
+              会话 #{viewing.id.slice(0, 8)}
+            </span>
+            {readonly ? (
+              <span className="chat-head__ro">只读 · 来自 {viewerOwner} 的分享</span>
+            ) : (
+              <button
+                type="button"
+                className="chat-head__share"
+                onClick={() => void onShare(viewing.id)}
+                title="复制分享链接（会把这条会话设为可分享）"
+              >
+                {viewing.visibility === 'shared' ? '已分享 · 复制链接' : '复制链接'}
+              </button>
+            )}
+          </div>
+        )}
+        {toast && <div className="chat-toast">{toast}</div>}
         {(rag || skills.length > 0 || mcp?.connected || mcp?.error) && (
           <p className="rag-hint">
             {rag && (
@@ -749,7 +983,12 @@ export default function App() {
 
       <footer className="composer-wrap">
         {error && <div className="error-banner">{error}</div>}
-        {page === 'chat' && (
+        {readonly && (
+          <div className="readonly-note">
+            这是 <strong>{viewerOwner}</strong> 分享的会话，只能查看。要自己提问请开一个新会话。
+          </div>
+        )}
+        {page === 'chat' && !readonly && (
           <div className="hints">
             <label className={codeTeam ? 'team-switch team-switch--on' : 'team-switch'}>
               <input
@@ -786,10 +1025,13 @@ export default function App() {
             ref={composerRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            disabled={readonly}
             placeholder={
-              activeBusy
-                ? '继续输入可以直接发出去（插话），不用等这一轮结束'
-                : '输入问题，Enter 发送，Shift+Enter 换行'
+              readonly
+                ? `只读：这是 ${viewerOwner} 分享的会话`
+                : activeBusy
+                  ? '继续输入可以直接发出去（插话），不用等这一轮结束'
+                  : '输入问题，Enter 发送，Shift+Enter 换行'
             }
             rows={2}
             onKeyDown={(e) => {
@@ -916,11 +1158,14 @@ export default function App() {
               busyIds={busyIds}
               onNew={openSession}
               onSelect={(id) => {
+                // 从只读态切回自己的会话：清掉别人那条，否则视图还停在分享的会话上
+                setViewerOwner(null)
+                setSharedSession(null)
                 setActiveId(id)
-                saveSessions(id, sessions)
                 setError('')
               }}
               onDelete={removeSession}
+              onShare={(id) => void onShare(id)}
             />
             {talk}
             {/*

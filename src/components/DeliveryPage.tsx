@@ -1,17 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  activateDelivery,
+  bindDeliveryWorkspace,
+  createDelivery,
+  deleteDelivery,
   fetchDelivery,
+  fetchDeliveryRuns,
   postGate,
-  resetDelivery,
   savePrd,
   saveSeat,
   streamDeliveryTurn,
   type DeliveryRun,
+  type Phase,
+  type RunSummary,
   type Seat,
   type TalkTrace,
 } from '../api/delivery'
+import { pickWorkspaceNative } from '../api/chat'
 import type { ToolCallView } from '../types'
 import { UnifiedDiff } from './CodeDiff'
+import DeliveryPreview from './DeliveryPreview'
 import './DeliveryPage.css'
 
 function stepTitle(name: string) {
@@ -19,7 +27,22 @@ function stepTitle(name: string) {
   if (name === 'workspace_write') return '写文件'
   if (name === 'write_patch') return '模型出补丁'
   if (name === 'repair') return '对失败的再改'
+  if (name === 'scaffold_write') return '补齐工程文件'
   return name
+}
+
+function folderName(root: string) {
+  const parts = root.replace(/[\\/]+$/, '').split(/[\\/]/)
+  return parts[parts.length - 1] || root
+}
+
+const PHASE_LABEL: Record<Phase, string> = {
+  drafting: '起草中',
+  developing: '研发中',
+  blocked_on_pm: '等产品',
+  reviewing: '评审中',
+  testing: '测试中',
+  signed: '已签字',
 }
 
 function nowCopy(run: DeliveryRun) {
@@ -33,7 +56,7 @@ function nowCopy(run: DeliveryRun) {
     return { title: '这份已经交给研发', body: '中间还能追问新功能；改右边这份，先撤回。' }
   }
   if (run.phase === 'developing') {
-    return { title: '研发对着选中的仓库改', body: '中间继续说，右边看改动。步骤跑完会折起来。' }
+    return { title: '研发对着这条需求的仓库改', body: '中间继续说，右边看改动。步骤跑完会折起来。' }
   }
   if (run.phase === 'reviewing') {
     return { title: '对照改动做评审', body: '中间是对话，右边是这轮改动。放行后才测。' }
@@ -41,7 +64,7 @@ function nowCopy(run: DeliveryRun) {
   if (run.phase === 'testing') {
     return { title: '按已勾验收来测', body: '中间是对话，右边是跑出来的结果。' }
   }
-  return { title: '测试已签字', body: '这条结束了。要再来一回，开一条新需求。' }
+  return { title: '测试已签字', body: '这条结束了，留在左边「已签字」里。要再来一回，开一条新需求。' }
 }
 
 function turnLabel(run: DeliveryRun) {
@@ -64,6 +87,20 @@ function placeholder(run: DeliveryRun) {
   if (run.phase === 'reviewing') return '这轮改动你还想盯什么'
   if (run.phase === 'testing') return '还想跑哪条已勾验收'
   return '换一个身份，或先过闸'
+}
+
+/**
+ * 不打字直接点按钮时，这句话会当成用户气泡发给后端。
+ * 别再统一塞「按右边这份需求做」——点几次就复读几条，看着像空转；
+ * 按身份/阶段说人话，研发那句顺带把模型往「一次做完整」推。
+ */
+function defaultTurnMessage(run: DeliveryRun) {
+  if (run.seat === 'dev' && run.phase === 'developing') {
+    return run.lastErrors?.length ? '把上一轮没写成的补上' : '按这份需求把功能一次实现完整'
+  }
+  if (run.seat === 'qa' && run.phase === 'reviewing') return '对照这轮改动出评审意见'
+  if (run.seat === 'qa' && run.phase === 'testing') return '按已勾的验收在仓库里跑一遍'
+  return ''
 }
 
 function workDiff(run: DeliveryRun) {
@@ -174,6 +211,28 @@ function ProcessFold({
   )
 }
 
+/** tsc / lint / eval 的原始输出：默认折起来，别整段倒在产物里挡住结论 */
+function CommandLogs({ logs }: { logs: NonNullable<DeliveryRun['test_report']>['commandLogs'] }) {
+  if (!logs.length) return null
+  const failed = logs.filter((log) => log.exitCode !== 0).length
+  return (
+    <details className="cmds" open={failed > 0}>
+      <summary>
+        命令输出 · {logs.length} 条{failed ? ` · ${failed} 条失败` : ''}
+      </summary>
+      {logs.map((log) => (
+        <div key={log.command} className={log.exitCode === 0 ? 'cmd' : 'cmd cmd--bad'}>
+          <div className="cmd__head">
+            <code>{log.command}</code>
+            <span>{log.exitCode === 0 ? '通过' : `退出 ${log.exitCode}`}</span>
+          </div>
+          <pre className="cmd__out">{log.excerpt}</pre>
+        </div>
+      ))}
+    </details>
+  )
+}
+
 function toSteps(trace?: TalkTrace): ToolCallView[] {
   return (trace?.steps ?? []).map((s) => ({
     id: s.id,
@@ -187,6 +246,7 @@ function toSteps(trace?: TalkTrace): ToolCallView[] {
 
 export function DeliveryPage() {
   const [run, setRun] = useState<DeliveryRun | null>(null)
+  const [runs, setRuns] = useState<RunSummary[]>([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [reason, setReason] = useState('')
@@ -197,14 +257,17 @@ export function DeliveryPage() {
   const [waitSec, setWaitSec] = useState(0)
   const [timeline, setTimeline] = useState<TimelineItem[] | null>(null)
   const [stickyDiff, setStickyDiff] = useState('')
+  /** 每回合「产物写完了」加一，预览面板拿它当启动信号；0 = 还没跑过，不显示 */
+  const [previewKey, setPreviewKey] = useState(0)
   const [gateNote, setGateNote] = useState<{ gate: string; message: string } | null>(null)
   const threadRef = useRef<HTMLDivElement | null>(null)
   const liveBuf = useRef('')
   const livePaint = useRef(0)
 
   const reload = useCallback(async () => {
-    const next = await fetchDelivery()
+    const [next, list] = await Promise.all([fetchDelivery(), fetchDeliveryRuns()])
     setRun(next)
+    setRuns(list.runs)
     const diff = workDiff(next)
     if (diff) setStickyDiff(diff)
     return next
@@ -241,10 +304,83 @@ export function DeliveryPage() {
     return () => window.clearInterval(timer)
   }, [busy])
 
-  async function onSeat(seat: Seat) {
+  /** 切需求：清掉上一条的临时态（步骤/差异/提示），再拉新的一条 */
+  function resetEphemeral() {
+    setPrompt('')
+    setSteps([])
+    setLive('')
+    setStickyDiff('')
+    setPreviewKey(0)
+    setGateNote(null)
+    setTimeline(null)
+    setError('')
+    setReason('')
+    setQuestions('')
+  }
+
+  async function onSwitch(id: string) {
+    if (!run || id === run.id || busy) return
+    resetEphemeral()
+    try {
+      setRun(await activateDelivery(id))
+      setRuns((await fetchDeliveryRuns()).runs)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  async function onNewRun() {
+    if (busy) return
+    resetEphemeral()
+    try {
+      const fresh = await createDelivery()
+      setRun(fresh)
+      setRuns((await fetchDeliveryRuns()).runs)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  async function onDeleteRun(id: string, title: string) {
+    if (busy) return
+    if (!window.confirm(`删掉「${title || '未命名需求'}」？这条的文档、对话、产物都会没。`)) return
+    resetEphemeral()
+    try {
+      setRun(await deleteDelivery(id))
+      setRuns((await fetchDeliveryRuns()).runs)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  async function onPickRepo() {
+    if (!run) return
     setError('')
     try {
-      setRun(await saveSeat(seat))
+      // 统一走服务端弹的系统选择器：桌面壳那个 pickWorkspace 会顺手改全局工作区，
+      // 用它给单条需求绑仓库会把全局也带跑偏。
+      const dir = await pickWorkspaceNative('给这条需求选一个仓库')
+      if (dir) setRun(await bindDeliveryWorkspace(run.id, dir))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  async function followGlobal() {
+    if (!run) return
+    setError('')
+    try {
+      setRun(await bindDeliveryWorkspace(run.id, undefined))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  async function onSeat(seat: Seat) {
+    if (!run) return
+    setError('')
+    try {
+      setRun(await saveSeat(seat, run.id))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -254,24 +390,16 @@ export function DeliveryPage() {
     if (!run) return
     setError('')
     try {
-      setRun(await postGate(run.seat, action, extra))
+      setRun(await postGate(run.seat, action, { ...extra, id: run.id }))
+      setRuns((await fetchDeliveryRuns()).runs)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
   }
 
-  async function onReset() {
-    setError('')
-    setPrompt('')
-    setStickyDiff('')
-    setGateNote(null)
-    setTimeline(null)
-    setRun(await resetDelivery())
-  }
-
   async function persistChecks(acceptance: DeliveryRun['prd']['acceptance']) {
     if (!run) return
-    setRun(await savePrd(run.seat, { acceptance }))
+    setRun(await savePrd(run.seat, { acceptance }, run.id))
   }
 
   async function onTurn() {
@@ -281,17 +409,17 @@ export function DeliveryPage() {
       return
     }
     if (run.seat === 'pm' && run.phase === 'blocked_on_pm') {
-      setError('要改这份先「撤回确认」；要另写一个功能点「新开一条需求」。')
+      setError('要改这份先「撤回确认」；要另写一个功能点，左边「新开一条需求」。')
       return
     }
     const needsRepo =
       (run.seat === 'dev' && run.phase === 'developing') ||
       (run.seat === 'qa' && (run.phase === 'reviewing' || run.phase === 'testing'))
     if (needsRepo && !run.workspace?.root) {
-      setError('先在上面工作区条选一个目录。')
+      setError('先给这条需求绑一个仓库，再让 AI 动手。')
       return
     }
-    const message = prompt.trim() || (run.seat === 'pm' ? '' : '按右边这份需求做')
+    const message = prompt.trim() || (run.seat === 'pm' ? '' : defaultTurnMessage(run))
     if (!message) {
       setError('先写你想做什么。')
       return
@@ -316,9 +444,20 @@ export function DeliveryPage() {
     setLive('请求已发出，模型出字后这里会隔一会儿刷新一次。')
     let actor = run.seat
     let base = run
+    // 产品在一条已经流转过的需求上再动手 = 另起一条，不再覆盖原来那条
     if (run.seat === 'pm' && run.phase !== 'drafting') {
-      base = await resetDelivery()
-      actor = 'pm'
+      try {
+        base = await createDelivery()
+        actor = 'pm'
+        setRuns((await fetchDeliveryRuns()).runs)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+        setBusy(false)
+        setSteps([])
+        setLive('')
+        setTimeline(null)
+        return
+      }
     }
     setRun({
       ...base,
@@ -328,6 +467,7 @@ export function DeliveryPage() {
       await streamDeliveryTurn({
         actor,
         message,
+        id: base.id,
         onEvent: (event) => {
           if (event.type === 'text_delta') {
             if (!event.delta || event.delta === '…') return
@@ -364,10 +504,12 @@ export function DeliveryPage() {
             )
           }
           if (event.type === 'role_start' && isTimelineRole(event.role)) {
-            setTimeline((prev) => markRole(prev ?? timelineFromPhase(base.phase), event.role, 'active'))
+            const role = event.role
+            setTimeline((prev) => markRole(prev ?? timelineFromPhase(base.phase), role, 'active'))
           }
           if (event.type === 'role_done' && isTimelineRole(event.role)) {
-            setTimeline((prev) => markRole(prev ?? timelineFromPhase(base.phase), event.role, 'done'))
+            const role = event.role
+            setTimeline((prev) => markRole(prev ?? timelineFromPhase(base.phase), role, 'done'))
           }
           if (event.type === 'artifact') {
             setRun((prev) => {
@@ -383,10 +525,12 @@ export function DeliveryPage() {
             if (event.name === 'patch') {
               const patch = event.payload as DeliveryRun['patch']
               if (patch?.diff && patch.diff !== '(与 HEAD 无差异)') setStickyDiff(patch.diff)
+              // 一回合恰好一次：挂在 artifact 上而不是 workspace_write（那是一次写一次，会连开十几次）
+              setPreviewKey((k) => k + 1)
             }
           }
           if (event.type === 'tool_result' && event.name === 'workspace_write') {
-            void fetchDelivery().then((next) => {
+            void fetchDelivery(base.id).then((next) => {
               setRun(next)
               const diff = workDiff(next)
               if (diff) setStickyDiff(diff)
@@ -425,6 +569,7 @@ export function DeliveryPage() {
   const canTalk =
     turnLabel(run) !== '现在不能让 AI 动手' && turnLabel(run) !== '先撤回或维持原文'
   const root = run.workspace?.root
+  const boundRoot = run.workspaceRoot || ''
   const talk = run.talk ?? []
   const checked = run.prd.acceptance.some((a) => a.checkedByPm)
   const needsRepo =
@@ -432,6 +577,21 @@ export function DeliveryPage() {
     (qa && (run.phase === 'reviewing' || run.phase === 'testing'))
   const diff = stickyDiff || workDiff(run)
   const shownTimeline = timeline ?? timelineFromPhase(run.phase)
+
+  // 提示合并到一个槽位，并按原文去重——同一句「已过期」以前会显示两遍
+  const notices: Array<{ tone: 'gate' | 'err' | 'warn'; text: string }> = []
+  if (gateNote) notices.push({ tone: 'gate', text: gateNote.message })
+  if (error) notices.push({ tone: 'err', text: error })
+  const staleCovered = Boolean(gateNote?.message.includes('过期') || gateNote?.message.includes('撤回'))
+  if (run.stale && !staleCovered) {
+    notices.push({ tone: 'warn', text: '这次撤回过，这条 run 已过期。重新确认后研发才能再改仓库。' })
+  }
+  if (needsRepo && !boundRoot && !root) {
+    notices.push({ tone: 'warn', text: '这条需求还没绑仓库。点右上「选仓库」再让 AI 动手。' })
+  }
+  const shownNotices = notices.filter(
+    (n, i) => notices.findIndex((m) => m.text === n.text) === i,
+  )
 
   const composer = (
     <form
@@ -459,13 +619,30 @@ export function DeliveryPage() {
     </form>
   )
 
+  /**
+   * 预览的启动信号。
+   * `previewKey` 只在本轮 SSE 收到 patch 时递增——它管「同一回合里再跑一次增量同步」。
+   * 但刷新页面、或切走再切回来时，patch 早就落盘了、SSE 不会重放，
+   * 光看 previewKey 会让预览永远不出现（产物明明在磁盘上）。所以「已经有产物」也算一次启动。
+   * 0 = 确实还没有任何产物，面板不显示。
+   */
+  const previewTrigger = Math.max(previewKey, run.patch?.files.length ? 1 : 0)
+
   const documentPane = (
     <section className="sheet" aria-label="结果">
       <header>
         <h2>{run.prd.title || '还没有产物'}</h2>
         <p>{frozen ? '已交给研发，正文不能改。要改先撤回。' : '右边是文档和改动，左边继续说。'}</p>
       </header>
-      {run.prd.body ? <pre className="sheet__body">{run.prd.body}</pre> : <p className="desk__muted">先在中间说你要做什么。</p>}
+      {/* 研发写完文件就自动跑起来。key 用 run.id：换一条需求就换一个容器视图 */}
+      {previewTrigger > 0 ? (
+        <DeliveryPreview key={run.id} runId={run.id} trigger={previewTrigger} />
+      ) : null}
+      {run.prd.body ? (
+        <pre className="sheet__body">{run.prd.body}</pre>
+      ) : (
+        <p className="desk__muted">先在中间说你要做什么。</p>
+      )}
       {run.prd.acceptance.length > 0 && (
         <fieldset className="sheet__acs">
           <legend>{pm ? '验收 · 至少勾一条才能交给研发' : '验收'}</legend>
@@ -513,22 +690,23 @@ export function DeliveryPage() {
           <div className="desk__diff-head">
             文件变更
             {diff.length > 8000 ? <span> · 预览截断</span> : null}
+            {run.patch?.scaffold?.written.length ? (
+              <span title={run.patch.scaffold.written.join('\n')}>
+                {' '}
+                · 补齐了 {run.patch.scaffold.written.map((f) => f.split(/[\\/]/).pop()).join('、')}
+              </span>
+            ) : null}
           </div>
           <UnifiedDiff text={diff.slice(0, 8000)} height={360} />
         </div>
       ) : null}
       {run.review?.comments.map((c) => (
         <p key={c.path}>
+          {c.mustFix ? <strong>【必须改】</strong> : null}
           {c.path}：{c.risk}
         </p>
       ))}
-      {run.test_report?.commandLogs.map((log) => (
-        <pre key={log.command}>
-          {log.command}  退出 {log.exitCode}
-          {'\n'}
-          {log.excerpt}
-        </pre>
-      ))}
+      <CommandLogs logs={run.test_report?.commandLogs ?? []} />
       {run.release_notes ? <pre>{run.release_notes.text}</pre> : null}
       <div className="sheet__gates">
         {pm && run.phase === 'drafting' && (
@@ -595,11 +773,6 @@ export function DeliveryPage() {
         {qa && (run.phase === 'reviewing' || run.phase === 'testing') && (
           <input placeholder="带风险必须写理由" value={reason} onChange={(e) => setReason(e.target.value)} />
         )}
-        {pm && (
-          <button type="button" className="sheet__ghost" onClick={() => void onReset()}>
-            新开一条需求
-          </button>
-        )}
       </div>
     </section>
   )
@@ -631,46 +804,191 @@ export function DeliveryPage() {
 
   return (
     <div className="desk">
-      <div className="desk__head">
-        <div className="desk__seats" role="tablist" aria-label="当前身份">
-          {(['pm', 'dev', 'qa'] as const).map((seat) => (
-            <button
-              key={seat}
-              type="button"
-              role="tab"
-              aria-selected={run.seat === seat}
-              className={run.seat === seat ? 'desk__seat desk__seat--on' : 'desk__seat'}
-              onClick={() => void onSeat(seat)}
-            >
-              {seat === 'pm' ? '我是产品' : seat === 'dev' ? '我是研发' : '我是测试'}
-            </button>
-          ))}
+      <header className="rail">
+        <div className="rail__top">
+          <div className="rail__brand">
+            <h1>交付工作台</h1>
+            <span>一条需求一条线，各自绑仓库；AI 写产物，闸门由你把</span>
+          </div>
+          <div className="rail__seats" role="tablist" aria-label="当前身份">
+            {(['pm', 'dev', 'qa'] as const).map((seat) => (
+              <button
+                key={seat}
+                type="button"
+                role="tab"
+                aria-selected={run.seat === seat}
+                className={run.seat === seat ? 'rail__seat rail__seat--on' : 'rail__seat'}
+                onClick={() => void onSeat(seat)}
+              >
+                {seat === 'pm' ? '产品' : seat === 'dev' ? '研发' : '测试'}
+              </button>
+            ))}
+          </div>
         </div>
-        <ol className="desk__timeline" aria-label="角色进度">
-          {shownTimeline.map((item) => (
-            <li
-              key={item.role}
-              className={`desk__tl desk__tl--${item.status}`}
-            >
-              {roleName(item.role)}
+        <ol className="rail__track" aria-label="交付进度">
+          {shownTimeline.map((item, i) => (
+            <li key={item.role} className={`rail__stage rail__stage--${item.status}`}>
+              <span className="rail__dot">{item.status === 'done' ? '✓' : i + 1}</span>
+              <span className="rail__stage-name">{roleName(item.role)}</span>
             </li>
           ))}
         </ol>
-        <div className="desk__now">
-          <strong>{status.title}</strong>
-          <p>{status.body}</p>
+        <div className="rail__foot">
+          <div className="rail__now">
+            <strong>{status.title}</strong>
+            <span>{status.body}</span>
+          </div>
+          <div className="repo">
+            <span className="repo__label">仓库</span>
+            <button
+              type="button"
+              className={boundRoot ? 'repo__btn repo__btn--own' : 'repo__btn'}
+              title={boundRoot || root || ''}
+              onClick={() => void onPickRepo()}
+            >
+              {boundRoot
+                ? folderName(boundRoot)
+                : root
+                  ? `跟随全局 · ${folderName(root)}`
+                  : '未选 · 点这里选'}
+            </button>
+            {boundRoot ? (
+              <button type="button" className="repo__clear" onClick={() => void followGlobal()}>
+                跟随全局
+              </button>
+            ) : null}
+          </div>
         </div>
-      </div>
+      </header>
 
-      {gateNote && <div className="desk__gate">{gateNote.message}</div>}
-      {error && <div className="desk__err">{error}</div>}
-      {run.stale && pm && <div className="desk__warn">这次撤回过。重新确认后，研发才能再改。</div>}
-      {needsRepo && !root && <div className="desk__warn">先在上面选一个目录，再让 AI 改仓库。</div>}
+      {shownNotices.map((notice) => (
+        <div
+          key={notice.text}
+          className={
+            notice.tone === 'gate' ? 'desk__gate' : notice.tone === 'err' ? 'desk__err' : 'desk__warn'
+          }
+        >
+          {notice.text}
+        </div>
+      ))}
 
-      <div className="desk__split">
+      <div className="desk__cols">
+        <aside className="demand-pane">
+          <DemandList
+            runs={runs}
+            activeId={run.id}
+            busy={busy}
+            onNew={() => void onNewRun()}
+            onSwitch={(id) => void onSwitch(id)}
+            onDelete={(id, title) => void onDeleteRun(id, title)}
+          />
+        </aside>
         {talkPane}
         {documentPane}
       </div>
+    </div>
+  )
+}
+
+function DemandList({
+  runs,
+  activeId,
+  busy,
+  onNew,
+  onSwitch,
+  onDelete,
+}: {
+  runs: RunSummary[]
+  activeId: string
+  busy: boolean
+  onNew: () => void
+  onSwitch: (id: string) => void
+  onDelete: (id: string, title: string) => void
+}) {
+  const active = runs.filter((r) => !r.signed)
+  const archived = runs.filter((r) => r.signed)
+  return (
+    <>
+      <div className="demand-pane__head">
+        <span>需求</span>
+        <button type="button" className="demand-pane__new" disabled={busy} onClick={onNew}>
+          新开
+        </button>
+      </div>
+      <div className="demand-pane__scroll">
+        <p className="demand-group">进行中 · {active.length}</p>
+        {active.length === 0 && <p className="demand-pane__empty">没有进行中的。点「新开」起一条。</p>}
+        {active.map((item) => (
+          <DemandRow
+            key={item.id}
+            item={item}
+            on={item.id === activeId}
+            busy={busy}
+            onSwitch={onSwitch}
+            onDelete={onDelete}
+          />
+        ))}
+        {archived.length > 0 && (
+          <>
+            <p className="demand-group">已签字 · {archived.length}</p>
+            {archived.map((item) => (
+              <DemandRow
+                key={item.id}
+                item={item}
+                on={item.id === activeId}
+                busy={busy}
+                onSwitch={onSwitch}
+                onDelete={onDelete}
+              />
+            ))}
+          </>
+        )}
+      </div>
+    </>
+  )
+}
+
+function DemandRow({
+  item,
+  on,
+  busy,
+  onSwitch,
+  onDelete,
+}: {
+  item: RunSummary
+  on: boolean
+  busy: boolean
+  onSwitch: (id: string) => void
+  onDelete: (id: string, title: string) => void
+}) {
+  const title = item.title || '未命名需求'
+  return (
+    <div className={on ? 'demand demand--on' : 'demand'}>
+      <button
+        type="button"
+        className="demand__pick"
+        disabled={busy}
+        aria-current={on}
+        onClick={() => onSwitch(item.id)}
+      >
+        <span className="demand__title">{title}</span>
+        <span className="demand__meta">
+          <span className={`demand__phase demand__phase--${item.phase}`}>{PHASE_LABEL[item.phase]}</span>
+          {item.workspaceRoot ? (
+            <span className="demand__repo">{folderName(item.workspaceRoot)}</span>
+          ) : null}
+        </span>
+      </button>
+      <button
+        type="button"
+        className="demand__del"
+        disabled={busy}
+        aria-label={`删掉 ${title}`}
+        title="删掉这条"
+        onClick={() => onDelete(item.id, title)}
+      >
+        ×
+      </button>
     </div>
   )
 }

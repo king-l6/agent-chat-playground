@@ -4,7 +4,10 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import { installUserHeader } from './lib/userProfile'
 import './index.css'
+
+installUserHeader()
 
 // createRoot：React 18+ 创建根节点；StrictMode 开发期会多跑一遍副作用帮查问题
 createRoot(document.getElementById('root')!).render(

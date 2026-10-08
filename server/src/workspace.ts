@@ -1,22 +1,32 @@
 /**
  * 工作区沙箱（服务端）：Agent 工具只认这里的 root。
  * 路径必须是相对路径，realpath 之后仍落在 root 内，防止 ../ 和符号链接逃出。
+ *
+ * root 是两级的：全局默认（聊天页、about 用）+ 请求上下文临时覆盖（交付页每条需求各绑一个仓库）。
+ * 后者走 AsyncLocalStorage，绑在异步执行上下文上，随 await 链传播——
+ * 交付回合是 SSE、跨 await 跑几分钟，用「切全局 root 再恢复」会被让出的事件循环捅穿。
  */
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { DATA_DIR, REPO_ROOT } from './paths.js'
 
 const MAX_BYTES = 256 * 1024
 const FILE = path.join(DATA_DIR, 'workspace.json')
 
-let root: string | null = null
+const als = new AsyncLocalStorage<{ root: string }>()
+let defaultRoot: string | null = null
+
+/** 当前生效的 root：在 withWorkspaceRoot 作用域内用需求仓库，否则用全局默认 */
+function currentRoot(): string | null {
+  return als.getStore()?.root ?? defaultRoot
+}
 
 function restore() {
   try {
     const data = JSON.parse(fs.readFileSync(FILE, 'utf8')) as { root?: string }
     if (typeof data.root === 'string' && fs.existsSync(data.root) && fs.statSync(data.root).isDirectory()) {
-      root = fs.realpathSync(data.root)
+      defaultRoot = fs.realpathSync(data.root)
     }
   } catch {
     /* 还没选过 */
@@ -26,40 +36,20 @@ function restore() {
 restore()
 
 export function getWorkspaceRoot() {
-  return root
+  return currentRoot()
+}
+
+/** 在这个仓库的作用域里跑一段逻辑（含其中所有 await）。交付回合最外层包一层。 */
+export function withWorkspaceRoot<T>(absRoot: string, fn: () => T): T {
+  const real = fs.realpathSync(absRoot)
+  if (!fs.statSync(real).isDirectory()) {
+    throw new Error('需求绑定的仓库不是目录')
+  }
+  return als.run({ root: real }, fn)
 }
 
 export function suggestedHere() {
   return REPO_ROOT
-}
-
-/** 选工作区之前用：列出磁盘上的子目录，不限于当前 root。 */
-export function browseDisk(abs?: string) {
-  const home = os.homedir()
-  const requested = (abs || '').trim() || home
-  if (!path.isAbsolute(requested)) throw new Error('路径必须是绝对路径')
-  const start = fs.realpathSync(requested)
-  if (!fs.statSync(start).isDirectory()) throw new Error('不是目录')
-  const parent = path.dirname(start)
-  const entries: Array<{ name: string; path: string }> = []
-  for (const entry of fs.readdirSync(start, { withFileTypes: true })) {
-    if (entry.name === '.' || entry.name === '..' || entry.name.startsWith('.')) continue
-    const full = path.join(start, entry.name)
-    try {
-      if (!fs.statSync(full).isDirectory()) continue
-    } catch {
-      continue
-    }
-    entries.push({ name: entry.name, path: full })
-  }
-  entries.sort((a, b) => a.name.localeCompare(b.name, 'zh'))
-  return {
-    cwd: start,
-    parent: parent !== start ? parent : null,
-    home,
-    here: REPO_ROOT,
-    entries,
-  }
 }
 
 export function setWorkspaceRoot(next: string) {
@@ -67,10 +57,10 @@ export function setWorkspaceRoot(next: string) {
   if (!fs.statSync(real).isDirectory()) {
     throw new Error('工作区必须是目录')
   }
-  root = real
+  defaultRoot = real
   fs.mkdirSync(DATA_DIR, { recursive: true })
-  fs.writeFileSync(FILE, JSON.stringify({ root }, null, 2), 'utf8')
-  return root
+  fs.writeFileSync(FILE, JSON.stringify({ root: defaultRoot }, null, 2), 'utf8')
+  return defaultRoot
 }
 
 function isInside(base: string, target: string) {
@@ -80,6 +70,7 @@ function isInside(base: string, target: string) {
 
 /** 把用户给的相对路径钉死在 root 里；绝对路径直接拒绝 */
 export function resolveUnderRoot(relPath: string) {
+  const root = currentRoot()
   if (!root) throw new Error('未选择工作区。桌面壳菜单「文件 → 打开工作区」选一个目录。')
   const trimmed = relPath.trim() || '.'
   if (path.isAbsolute(trimmed)) {
@@ -105,7 +96,7 @@ export function resolveUnderRoot(relPath: string) {
 }
 
 function toRel(abs: string, name: string) {
-  const rel = path.relative(root ?? '', path.join(abs, name))
+  const rel = path.relative(currentRoot() ?? '', path.join(abs, name))
   return rel.split(path.sep).join('/')
 }
 
@@ -152,7 +143,7 @@ export type WorkspaceDigest = {
 }
 
 /** 根目录里这些不给模型看：不是项目信息，还会把清单撑爆（node_modules 一个就上千条） */
-const NOISE = new Set([
+export const NOISE = new Set([
   'node_modules',
   '.git',
   '.next',
@@ -189,7 +180,7 @@ const README_EXCERPT = 1200
  * 绝不把异常抛进聊天链路——工作区信息是锦上添花，不能因为它挂掉整轮对话。
  */
 export function workspaceDigest(): WorkspaceDigest | null {
-  const base = root
+  const base = currentRoot()
   if (!base) return null
   const digest: WorkspaceDigest = {
     root: base,

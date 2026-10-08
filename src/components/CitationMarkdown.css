@@ -38,7 +38,7 @@
 /*
  * 浮层挂在 body 上（portal）+ fixed 定位，落点由 JS 按角标坐标算（见 CitationMarkdown.tsx）：
  * 角标常在 .msg__content table 的单元格里，那张表是 overflow-x:auto 的滚动容器，
- * absolute 浮层会被它裁成一条。z-index 30：要盖住 .topbar 的 10，但留在 .wspick 的 40 之下。
+ * absolute 浮层会被它裁成一条。z-index 30：要盖住 .topbar 的 10，但留在模态层之下。
  */
 .cite-popover {
   position: fixed;

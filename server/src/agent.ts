@@ -12,7 +12,7 @@ import { resolveLlmFromSettings } from './settings.js';
 import { skillsCatalogText } from './skills.js';
 import { mcpInstructions, mcpToolDefinitions, publicMcp } from './mcp.js';
 import { executeTool, getToolDefinitions } from './tools.js';
-import { filterToolsByIntent, routeIntent } from './intent.js';
+import { filterToolsByIntent, isMcpStatusQuery, routeIntent } from './intent.js';
 import { workspaceDigest } from './workspace.js';
 import { memoryBlockFor } from './memory/recall.js';
 import type { ChatMessageInput, SseEvent } from './types.js';
@@ -112,12 +112,29 @@ function workspacePromptBlock() {
   return `\n${lines.join('\n')}\n`
 }
 
+/** 连接状态文案：mock / live 元问题共用，避免模型去 workspace 找 mcp 目录 */
+function mcpStatusText() {
+  const mcp = publicMcp()
+  if (!mcp.enabled) return 'MCP 未启用。到「设置 → MCP」打开并填 URL。'
+  if (!mcp.connected) {
+    return `MCP 已启用但未连上${mcp.error ? `：${mcp.error}` : '。'}检查 URL / Cookie 后在设置页保存重试。`
+  }
+  if (mcp.tools.length === 0) {
+    return `已连上 ${mcp.url}，但 tools/list 为空。`
+  }
+  return `已连接 MCP（${mcp.url}），当前 ${mcp.tools.length} 个工具：\n${mcp.tools.map((n) => `- ${n}`).join('\n')}`
+}
+
 function mcpPromptBlock() {
   const tools = mcpToolDefinitions()
-  if (tools.length === 0) return ''
+  if (tools.length === 0) {
+    const mcp = publicMcp()
+    if (!mcp.enabled) return ''
+    return `${RULE_NO_MCP}. MCP 已启用但未连上${mcp.error ? `（${mcp.error}）` : ''}。用户问「有哪些 mcp / 已连接工具」时据实说明未连上，不要去工作区翻 mcp 目录。`
+  }
   const names = tools.map((t) => t.function.name).join('、')
   const extra = clipToLine(mcpInstructions(), MCP_NOTES_LIMIT).trim()
-  return `${RULE_NO_MCP}. 已连接 MCP 工具：${names}。用户问这些工具能查的业务数据时调用它们，不要用 search_notes 代替。${extra ? `服务端说明：${extra}` : ''}`
+  return `${RULE_NO_MCP}. 已连接 MCP 工具：${names}。用户问「有哪些 mcp / 已连接的工具」时直接按本条列出，禁止 workspace_list / search_notes。**与知识库主题重叠时（业务实时数据）优先 MCP，禁止用 search_notes 顶替。**多步查询自己编排：下游工具缺 *_id 时，先调名称/描述匹配的 list 类 MCP 拿候选，把名称+ID 列给用户选，再带齐 ID 调原工具——不要空口要裸 ID，也不要猜。服务端也会在缺参或空结果时返回 auto_lists / candidates / need_user_input：有 need_user_input 就按 candidates 问用户；唯一候选会被自动填上。禁止编造 ID；禁止在已经查过列表后还说「我可以先查列表」。${extra ? `服务端说明：${extra}` : ''}`
 }
 
 /** 向 SSE 管道推事件的函数类型（由 index.ts 注入） */
@@ -372,17 +389,9 @@ async function streamMock(messages: ChatMessageInput[], send: Send) {
     return;
   }
 
-  // —— MCP 清单（intent 已把带 mcp 的问句收成 chat，这里直接读连接状态）——
-  if (/\bmcp\b/i.test(last)) {
-    const mcp = publicMcp()
-    const text = !mcp.enabled
-      ? '（mock）MCP 未启用。到「配置」页打开并填 URL。'
-      : !mcp.connected
-        ? `（mock）MCP 已启用但未连上${mcp.error ? `：${mcp.error}` : '。'}检查 URL / 鉴权后重试。`
-        : mcp.tools.length === 0
-          ? `（mock）已连接 ${mcp.url}，但 tools/list 为空。`
-          : `（mock）已连接 MCP（${mcp.url}），当前工具：\n${mcp.tools.map((n) => `- ${n}`).join('\n')}`
-    await streamText(text)
+  // —— MCP 清单：直接读连接状态，别让模型去翻工作区 ——
+  if (isMcpStatusQuery(last)) {
+    await streamText(`（mock）${mcpStatusText()}`)
     send({ type: 'done' })
     return
   }
@@ -441,6 +450,16 @@ async function runLive(
 
   const lastUser = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
 
+  // MCP 元问题：状态在服务端，弱模型会误调 workspace_list 找「mcp」目录
+  if (isMcpStatusQuery(lastUser)) {
+    const text = mcpStatusText()
+    for (const part of text.match(/[\u4e00-\u9fff]{1,2}|[^\u4e00-\u9fff]+/g) ?? [text]) {
+      send({ type: 'text_delta', delta: part })
+    }
+    send({ type: 'done' })
+    return
+  }
+
   // 长期记忆召回必须在拼 system 之前：命中几条就作为规则 12 注入。
   // memoryBlockFor 内部 fail-open，出错返回空串，不影响这一轮聊天。
   const memoryBlock = await memoryBlockFor(lastUser);
@@ -459,9 +478,9 @@ async function runLive(
   // 预加载 skill 会占掉第 1 步，返回值就是下一个可用编号
   const preloadStep = await preloadMatchedSkills(lastUser, history, send);
 
-  // 薄意图 → 工具白名单：明确是时间/工作区/知识库时收紧，chat 不收紧（含 MCP）
+  // 薄意图 → 工具白名单；问句命中 MCP 能力时会拿掉 search_notes（见 filterToolsByIntent）
   const intent = routeIntent(lastUser)
-  const tools = filterToolsByIntent(getToolDefinitions(), intent)
+  const tools = filterToolsByIntent(getToolDefinitions(), intent, lastUser)
   const maxRounds = mcpToolDefinitions().length > 0 ? 6 : 4
   let step = preloadStep
   for (let round = 0; round < maxRounds; round += 1) {
@@ -605,18 +624,24 @@ async function runLive(
 /**
  * 入口：有 Key 走 live，否则 mock
  * index.ts 的 /api/chat 只调用这一处
+ *
+ * @param sessionId 只用于日志打点（[chat][<sid>]），不参与逻辑；没带就是空串
  */
 export async function runAgentChat(options: {
   messages: ChatMessageInput[];
   send: Send;
+  sessionId?: string;
 }) {
   const { apiKey, baseURL, model } = resolveLlmConfig();
+  const sid = options.sessionId || '-';
 
   if (!apiKey) {
+    console.log('[chat][%s] mock 流式（没有 API Key）', sid);
     await streamMock(options.messages, options.send);
     return;
   }
 
+  console.log('[chat][%s] live model=%s', sid, model);
   const client = new OpenAI({ apiKey, baseURL });
   try {
     await runLive(client, model, options.messages, options.send);

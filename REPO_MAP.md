@@ -36,7 +36,7 @@ dist/ dist-electron/ dist-server/ release/   构建产物，不要手改
 ## 三、前端 `src/`
 
 - `App.tsx` — 路由/外壳。hash 路由共 **8** 页：
-  - `#/` 对话（Chat）
+  - `#/` 对话（Chat）；`#/c/<归属人>/<会话id>` 仍是对话页，只是把会话 id 也放进路由（刷新回到同一条、链接能直接发人）
   - `#/documents` 文档 / 知识库（`#/knowledge` 同页）
   - `#/memory` 长期记忆
   - `#/vectors` 向量库
@@ -65,7 +65,7 @@ dist/ dist-electron/ dist-server/ release/   构建产物，不要手改
   - `api/image.ts` — 「一键生成美女图片」接口层（`fetchBeautyStyles` / `generateBeautyImage`，见第六节）。
 - `pipelineFromGraph.ts` — DAG 拓扑序 + 分流节点编译。
 - `canvasStore.ts` — 只存画布拓扑（localStorage），**不存运行结果**。
-- `sessionStore.ts` — 会话状态（localStorage，key `agentos.sessions.v1`）；`uid()` 同时是消息锚点来源。
+- `sessionStore.ts` — 会话状态。**服务端为准**：一条会话一个 `server/data/users/<归属人>/sessions/<id>.json`；localStorage（key `agentos.sessions.v1`）降级成首帧缓存 + 离线兜底，不再当唯一真相。`uid()` 同时是消息锚点来源。
   `ChatSession` 有**两个**时间字段，别混用：
   - `lastUserAt` = 最后一次**用户提问**时间，且只在 `App.tsx` 的 `onSend` 里推进；
   - `updatedAt` = 最后一次活动时间，`patchAssistant` 每个 SSE 事件都会刷它。
@@ -78,7 +78,9 @@ dist/ dist-electron/ dist-server/ release/   构建产物，不要手改
   - `SessionList.tsx` + `SessionList.css` — 左侧历史会话：搜索框（匹配标题与消息正文）+ 按「今天/昨天/近 7 天/更早」分组；排序、分组、`<time>` 显示三处**共用同一个 `sortKey(s)`**（见 3.2），点击 `onSelect` 切会话。
   - `ChatOutline.tsx` + `ChatOutline.css` — 右侧**提问目录**：列本轮每条用户提问，点击跳转，`IntersectionObserver` 高亮当前读到的那条；≤1180px 隐藏。
   - `ToolCard.tsx` — 工具卡；写入批准用 `CodeDiff` 并排 diff。
-  - `CodeDiff.tsx` — Monaco DiffEditor / 统一 diff（交付页 + 批准卡共用）。
+  - `CodeDiff.tsx` — Monaco DiffEditor / 统一 diff / `ReadonlyFile`（交付页 + 批准卡共用）。**Monaco 只在这一个文件里 import**，别处要看代码就复用 `ReadonlyFile`；它是「现在长什么样」，`UnifiedDiff` 是「改了什么」，两者不是一回事。
+  - `DeliveryPreview.tsx` + `.css` — 交付页右侧的产物预览（`documentPane` 的 `<header>` 之后）：把研发这轮写的文件挂进 WebContainer 跑起来，两个页签「运行结果」（iframe + 安装/启动日志）/「看代码」（文件树 + `ReadonlyFile`）。
+    **旁挂定位**：内部 catch 全部异常，不向上抛、不参与任何 `disabled` 计算——预览起不来只是一个红块，PRD / diff / 闸门照常。触发是 `artifact name:'patch'`（一回合恰好一次），**不要挂 `workspace_write`**，那是一写一次、一回合会连开十几次。
   - `WorkspaceBar.tsx` — 工作区条；`folderName()` 取末级目录名，完整路径在 `title` 与 `.wsbar__full` 里（框内并排时该 span 被 CSS 隐藏）。
   - `DeliveryPage.tsx` — 交付泳道时间线与文件变更。
   - `VideoPage.tsx` / `MemoryPage.tsx` / `DocumentsPage.tsx` / `VectorsPage.tsx` / `CanvasPage.tsx` / `SettingsPage.tsx` / `BibleDrawer.tsx` / `ChatImage.tsx` / `CitationMarkdown.tsx` / `AppSidebar.tsx`。
@@ -94,6 +96,9 @@ dist/ dist-electron/ dist-server/ release/   构建产物，不要手改
   `src/pages/index.tsx` 本身自洽（只 import react 的 type），未改动；它作为「应用外壳」和 `src/App.tsx` 是两套，删之前先确认没人当文档看。
 - 另有 `lib/` `types.ts` `index.css` `assets/` `desktop.d.ts`（Electron 注入的类型声明）。
 - `lib/contextUsage.ts` — **只服务用量环**（口径见 3.1）：`estimateOutgoingTokens` 是当前分子用的函数，`estimateMessagesTokens` 是旧的高估口径（别再用），`contextWarnOf` 是预警判定，`contextRatioOf` 只负责画环。
+- `lib/webcontainer.ts` — 产物预览的沙箱生命周期。**`WebContainer` 每个 document 只能 boot 一次、`mount()` 更是一次性的**，所以 instance 放在这里当模块级单例，组件只能订阅状态、绝不能自己 boot。`@webcontainer/api` 是动态 `import()` 的，不进主 chunk。
+  首轮 boot → mount 整棵树 → `npm install` → `npm run dev`；之后只做增量：内容没变的文件不写（全量重写会把 Vite watcher 全触发，HMR 退化成整页重载），`package.json` 变才重装、`vite.config.*` / `index.html` 变才重启 dev server，其余交给 HMR。
+  `runDev` 等 `server-ready` 有 90s 超时（归 `start` 类），boot 失败**不重试**（重试只会同样失败，由 UI 决定是否重载）。`classifyBootError` 把异常归到 `isolation / network / install / start / fs / unknown` 并给可解释文案——网络不通是外因，宁可说「大概率是 registry 不通」也不糊成「预览失败」。
 
 ### 3.1 上下文用量环的口径（改这里之前必读）
 
@@ -129,6 +134,14 @@ dist/ dist-electron/ dist-server/ release/   构建产物，不要手改
 **反例（曾经踩过）**：早期实现三处都读 `updatedAt`，而 `patchAssistant` 每个 token 都刷它——多个会话同时生成时谁刚吐字谁就窜到最前，列表上下反复换位。修复只需把读取点换成 `lastUserAt` + 在 `onSend` 写入，不需要动 `busyIds`（「生成中」标记与排序互不相干）。
 
 所以：**要按什么排序，就只在那个事件上推进对应的字段**。新增排序维度时别顺手拿 `updatedAt` 顶替，也别在 `patchAssistant` 里推进 `lastUserAt`。
+
+会话进路由 + 服务端持久化（分享链接）落地位置：
+
+- **id 只有一份** —— 界面上的 `会话 #<短id>`、地址栏 `#/c/<归属人>/<id>`、后端日志 `[chat][<id>]` 三处必须是同一个值（`sessionStore.ts` 的 `uid()` 生成）。对链路时按 `[chat][<会话id>]` `grep` 就能捞出某个会话的全部回合。
+- **路由解析在 `App.tsx`** —— `sessionRouteFromHash()` 认 `#/c/<归属人>/<id>`（`#/c/<id>` 视为归属人=自己），`pageFromHash()` 把 `c/...` 归到对话页。归别人 → `fetchSharedSession()` 进**只读**（`viewerOwner !== null`，输入框禁用）；归自己 → `setActiveId()`。
+- **写路径**：state 变 → 300ms 防抖 → 同步写 localStorage（秒开）+ 按对象引用 diff 出变化的会话逐条 `PUT /api/sessions/:id`。`ownerId` 恒为后端 `currentUserId()`，**前端传什么都不算数**，所以写不到别人的会话上。
+- **可见性**：`visibility: 'private' | 'shared'`，默认私密。`GET /api/sessions/:ownerId/:id` 只有「归属人本人」或「`shared`」才放行（否则 403）；`onShare()` 先把会话置 `shared` 再复制 `#/c/<我>/<id>` 到剪贴板。
+- **别踩的坑**：①排序/分组仍只认 `lastUserAt`，服务端存的 `updatedAt` 只用于「谁更新」的合并判断；②首次加载走 `reconcile()` 取「同 id 里 `updatedAt` 更大的那份」，并把本地独有的推上去——服务端空而本地有缓存时会自动补传，不需要单独的迁移脚本。
 
 ### 3.3 代码团队的「四段」与前端名单（改角色前必读）
 
@@ -168,6 +181,8 @@ explore（探索，只读） → implement（改码，唯一能写） → review
   2. 业务逻辑（「一键生成美女图片」整块：`BEAUTY_*` 常量、`checkBeautyPrompt`、`buildBeautySvg`、`createBeautyRecord`、`withBeautyTimeout`，以及 `parseExpires` / `memoryTypeOf` / `parseContextWindow` 等小工具）；
   3. 启动流程（`startServer()`）。
   想拆的话，先把「美女图」整块搬到独立模块，再把路由按域拆 `routes/*.ts`。
+- `sessions.ts` — 会话存取，一会话一文件（`server/data/users/<归属人>/sessions/<id>.json`，照 `video/store.ts` 的范式）。`listSessions` / `getSession` / `upsertSession` / `deleteSession` 四个函数，id 与 ownerId 都先按 `^[a-z0-9][a-z0-9_-]{1,63}$` 校验（防路径穿越）。路由挂在 `index.ts`：`GET /api/sessions`、`GET /api/sessions/:ownerId/:id`、`PUT|DELETE /api/sessions/:id`。**owner 恒取 `currentUserId()`**，请求体里的 ownerId 一律忽略——这是「不能替别人写/删」的唯一保障。
+- `/api/chat` 现在收 `sessionId`（校验后才用）并贯穿链路：`runAgentChat` / `runCodeTeamChat` 都带 `sessionId`，日志统一 `[chat][<sid>] start|done|error` 前缀。**注意**：会话正文不在这里落盘，前端持有权威消息状态、由前端 PUT；后端只负责按 id/归属人存取 + 打链路日志。
 - `/api/health` 返回 `{ ok, mode, model, contextWindow, rag, skills, mcp, workspace }`。`contextWindow` 就是用量环的分母，**只在这里和 `/api/settings` 给**（都走 `settings.resolveContextWindow()`，不在路由里重复判断）。
 - 「一键生成美女图片」现存接口：`GET /api/image/styles`、`POST|GET /api/image/generate`（也挂 `/api/images/generate`）、`GET /api/image/render/:id`。注意两点：①它和视频分镜的图片缓存是**两套**东西，缓存接口 `GET /api/image/cache/:id` 走的是 `imageCache.ts`，别混；②`index.ts` 末尾有一段自欺代码——把 `BEAUTY_RENDER_CACHE`（一个 `Map`）强转成 `{ registerRoutes? }` 再调用 `registerRoutes?.(app)`，注释还指向不存在的 `server/src/image.ts`，永远走不到，属于可删死代码。GET 触发有副作用生成、缓存只按 TTL 清理无容量上限，也建议一并收拾。
 - `agent.ts` — 默认 Chat Agent 循环（模型看工具列表自行选择调用）。`runLive` 里有两件与「上下文」相关、但**不是**上下文裁剪的事：`maxRounds`（有 MCP 时 6，否则 4）与 `codeTeam.ts` 的 `maxToolRounds` 都是**工具调用轮次**上限。目前没有「按上下文裁剪 history」的策略。
@@ -178,6 +193,10 @@ explore（探索，只读） → implement（改码，唯一能写） → review
 - `workflow.ts` — 画布执行器（search / calc / answer）。
 - `eval.ts` — 黄金集 Recall@K 评测（`npm run eval:rag`，原 8 题不许坏）。
 - `delivery/` — 交付泳道（PM / Dev / Review / QA）；`implement.ts` 写补丁。
+  - `artifacts.ts` — 两件事，都别绕过：①`diffForFiles` 给**未跟踪文件**合成 unified diff（`gitDiff` 跑的是 `git diff HEAD`，新项目里全是 untracked，不合成的话「文件变更」在空目录场景本来就是空的）；②`collectArtifacts` 把工程根下的文件整包读给前端预览。根目录那份 `NOISE` 排除名单从这里复用，**点开头的按 .env/.git 单独挡掉**——整包是发进浏览器 iframe 的。
+    产物根用 `inferProductRoot` 推断：**不能直接取共同父目录**，实测 `/Users/bilibili/Desktop/test-001` 那批（`src/pages/*`、`src/App.tsx`、`src/routes.ts`、`src/index.css`）共同父目录是 `src`，但 `package.json` 显然该放在上一层，所以命中 `src` 就往上退一层。
+  - `scaffold.ts` — 模型漏了工程文件时的兜底（`PATCH_SYSTEM` 已经要求它产出，但它会漏）。窄触发（有 `.tsx`/`.jsx` 且没有 `package.json`）、**绝不覆盖已存在文件**。两套路径口径别混：`at()` 出的是**工作区相对**（写盘 / 进 `patch.files`），`stripRoot()` 出的是**工程根相对**（`index.html` 的 script src 这种正文里的 URL），预览时产物根会被剥掉当容器根。依赖版本刻意取保守档（React 18 / Vite 5 / TS 5），**不要照抄本仓库的**（React 19 / Vite 8 / TS 6 在沙箱里未必装得顺）；路由库按代码里出现 `useHistory|useRouteMatch|Switch` 与否在 `^5.3.4` / `^6.26.2` 之间选，装错版本是白屏不是类型报错。
+  - `health.ts` — `checkProjectHealth()`：**只做存在性与解析，不跑命令**。工程文件齐不齐、`package.json` 能不能 parse、**所有已存在的入口候选**（`src/main.tsx` 与 `index.html` 会同时存在）引用的本地路径是否落地、`index.html` 有没有 `<script>`。结论进 `reviewing` 的 `mustFix: true` 评审意见，闸门那边的 `comments.some(c => c.mustFix)` 规则会把「放行去测试」拦下来（这条规则以前是死的：服务端从来没设过 `mustFix: true`）。
 - `video/` — 分镜 / 静帧 / TTS 等。
 - `memory/` — 长期记忆召回（`memoryBlockFor()` 的结果作为「记忆规则」注入 system prompt）。
 - `server/scripts/` — 运维脚本，全部走 tsx 直跑 TS：`resync-index.ts`、`wiki-ingest.ts`、`wework-crawler.ts`。

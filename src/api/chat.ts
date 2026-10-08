@@ -15,12 +15,14 @@ const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '';
  * @param signal   AbortController.signal，点「停止」时 abort 会中断请求
  * @param onEvent  每收到一个 SseEvent 回调一次（交给 App.handleEvent）
  * @param autoApprove 代码团队专用：写入不再逐条挂起等人点（高风险文件仍会拦）
+ * @param sessionId 当前会话 id。只被后端拿去打链路日志（[chat][<sid>]），不参与对话逻辑
  */
 export async function streamChat(options: {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   mode?: 'default' | 'code_team';
   signal?: AbortSignal;
   autoApprove?: boolean;
+  sessionId?: string;
   onEvent: (event: SseEvent) => void;
 }) {
   // 1) 用 axios 的 fetch adapter + stream，才能在浏览器里边收边解析 SSE
@@ -32,6 +34,7 @@ export async function streamChat(options: {
         messages: options.messages,
         mode: options.mode ?? 'default',
         autoApprove: options.autoApprove === true,
+        sessionId: options.sessionId,
       },
       {
         adapter: 'fetch',
@@ -242,20 +245,16 @@ export async function fetchWorkspaceInfo() {
   return data
 }
 
-export type WorkspaceBrowse = {
-  cwd: string
-  parent: string | null
-  home: string
-  here: string
-  entries: Array<{ name: string; path: string }>
-}
-
-export async function browseWorkspace(dir?: string) {
+/**
+ * 弹系统目录选择器（服务端调 macOS 原生弹窗）。
+ * 阻塞到用户选完或取消；取消返回 null。非 Electron 环境下也走这条。
+ */
+export async function pickWorkspaceNative(prompt?: string) {
   try {
-    const { data } = await axios.get<WorkspaceBrowse>(`${API_BASE}/api/workspace/browse`, {
-      params: dir ? { dir } : undefined,
+    const { data } = await axios.post<{ root: string | null }>(`${API_BASE}/api/workspace/pick`, {
+      prompt,
     })
-    return data
+    return data.root
   } catch (err) {
     if (axios.isAxiosError(err)) {
       const msg = (err.response?.data as { error?: string } | undefined)?.error
@@ -329,6 +328,26 @@ export async function saveSettings(body: {
 }) {
   try {
     const { data } = await axios.put<LlmSettingsPublic>(`${API_BASE}/api/settings`, body)
+    return data
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      const msg = (err.response?.data as { error?: string } | undefined)?.error
+      throw new Error(msg || err.message)
+    }
+    throw err
+  }
+}
+
+export type EnvPublicRow = { key: string; hasValue: boolean }
+
+export async function fetchEnv() {
+  const { data } = await axios.get<{ vars: EnvPublicRow[] }>(`${API_BASE}/api/env`)
+  return data
+}
+
+export async function saveEnv(vars: Array<{ key: string; value?: string; keep?: boolean }>) {
+  try {
+    const { data } = await axios.put<{ vars: EnvPublicRow[] }>(`${API_BASE}/api/env`, { vars })
     return data
   } catch (err) {
     if (axios.isAxiosError(err)) {

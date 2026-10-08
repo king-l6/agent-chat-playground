@@ -1,5 +1,6 @@
 /**
  * Chat「代码团队」：固定 explore → implement → review → summary。
+ * 这四段的顺序在 codeTeamGraph.ts 里用 LangGraph 串起来，模型调用走 LangChain。
  * workspace_write 不直接落盘，发 tool_approval 挂起，等人 POST /api/chat/approve。
  * 挂起记录写到磁盘：热重载后仍能按原参数批准/拒绝。
  *
@@ -18,13 +19,13 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import OpenAI from 'openai'
 import type {
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
   ChatCompletionTool,
 } from 'openai/resources/chat/completions'
 import { resolveLlmConfig } from './agent.js'
+import { createTeamModel, runCodeTeamGraph, type TeamModel } from './codeTeamGraph.js'
 import { wantsKnowledge } from './intent.js'
 import { DATA_DIR } from './paths.js'
 import { executeTool, getToolDefinitions } from './tools.js'
@@ -430,8 +431,7 @@ function maxToolRounds(role: AgentRole) {
 }
 
 async function forceTextClose(
-  client: OpenAI,
-  model: string,
+  model: TeamModel,
   role: AgentRole,
   history: ChatCompletionMessageParam[],
   send: Send,
@@ -451,18 +451,11 @@ async function forceTextClose(
             : '工具轮次已用完。不要再调用任何工具。只用下面证据用中文短评；没出现在证据里的改动不要评。') +
       `\n\n${evidence}\n\n${EVIDENCE_RULES}`,
   })
-  const stream = await client.chat.completions.create({
-    model,
-    messages: history,
-    stream: true,
-  })
   let text = ''
-  for await (const chunk of stream) {
+  for await (const delta of model.stream(history, [])) {
     if (signal.aborted) break
-    const delta = chunk.choices[0]?.delta
-    const reasoning = (delta as { reasoning_content?: string } | undefined)?.reasoning_content
-    if (reasoning) send({ type: 'reasoning_delta', delta: reasoning })
-    if (delta?.content) {
+    if (delta.reasoning_content) send({ type: 'reasoning_delta', delta: delta.reasoning_content })
+    if (delta.content) {
       text += delta.content
       send({ type: 'text_delta', delta: delta.content })
     }
@@ -524,8 +517,7 @@ async function runOneTool(
 }
 
 async function runRoleLive(
-  client: OpenAI,
-  model: string,
+  model: TeamModel,
   role: AgentRole,
   allowed: string[],
   history: ChatCompletionMessageParam[],
@@ -557,25 +549,14 @@ async function runRoleLive(
             : '先调 git_diff 或 git_status；需要核对就同轮并行再读。',
       })
     }
-    const stream = await client.chat.completions.create({
-      model,
-      messages: history,
-      tools: tools.length ? tools : undefined,
-      stream: true,
-    })
-
     let assistantText = ''
     const toolAcc = new Map<number, { id: string; name: string; arguments: string }>()
     const announced = new Set<string>()
     let stepped = false
 
-    for await (const chunk of stream) {
+    for await (const delta of model.stream(history, tools)) {
       if (signal.aborted) break
-      const choice = chunk.choices[0]
-      if (!choice) continue
-      const delta = choice.delta
-      const reasoning = (delta as { reasoning_content?: string } | undefined)?.reasoning_content
-      if (reasoning) send({ type: 'reasoning_delta', delta: reasoning })
+      if (delta.reasoning_content) send({ type: 'reasoning_delta', delta: delta.reasoning_content })
       // 先攒着：同轮若最终有 tool_calls，这段常是「还没读就编的结论」，不刷给用户
       if (delta?.content) assistantText += delta.content
       if (delta?.tool_calls) {
@@ -619,7 +600,7 @@ async function runRoleLive(
 
     if (allCalls.length === 0) {
       if (forceTool) {
-        const closing = await forceTextClose(client, model, role, history, send, signal)
+        const closing = await forceTextClose(model, role, history, send, signal)
         send({ type: 'role_done', role })
         return closing || lastText
       }
@@ -657,7 +638,7 @@ async function runRoleLive(
   }
 
   // 模型一直调工具不收口：再要一轮纯文字，不要再甩「上限」糊弄用户
-  const closing = await forceTextClose(client, model, role, history, send, signal)
+  const closing = await forceTextClose(model, role, history, send, signal)
   send({ type: 'role_done', role })
   return closing || lastText
 }
@@ -753,11 +734,15 @@ export async function runCodeTeamChat(options: {
   signal: AbortSignal
   /** 前端开关：本轮开始就让后续写入不再逐条挂起（高风险仍拦） */
   autoApprove?: boolean
+  /** 只用于日志打点（[chat][<sid>]），不参与逻辑；没带就是空串 */
+  sessionId?: string
 }) {
   const tracked = new Set<string>()
   const { send, messages, signal, autoApprove } = options
+  const sid = options.sessionId || '-'
   try {
     if (!getWorkspaceRoot()) {
+      console.log('[chat][%s] 代码团队：未连接工作区', sid)
       send({ type: 'error', message: '代码团队需要先连接工作区。请在聊天底部选一个本地仓库。' })
       send({ type: 'done' })
       return
@@ -767,12 +752,14 @@ export async function runCodeTeamChat(options: {
 
     const { apiKey, baseURL, model } = resolveLlmConfig()
     if (!apiKey) {
+      console.log('[chat][%s] 代码团队：mock 流式（没有 API Key）', sid)
       await runMock(messages, send, signal, tracked)
       return
     }
+    console.log('[chat][%s] 代码团队：live model=%s', sid, model)
 
     const lastUser = messages.filter((m) => m.role === 'user').at(-1)?.content ?? ''
-    const client = new OpenAI({ apiKey, baseURL })
+    const teamModel = createTeamModel({ apiKey, baseURL, model })
     send({ type: 'meta', mode: 'live', model })
 
     const transcript: ChatCompletionMessageParam[] = messages.map((m) => ({
@@ -781,44 +768,42 @@ export async function runCodeTeamChat(options: {
     }))
 
     /*
-     * 工具按意图给：explore 默认只有工作区 + git，只有这句像在问文档/知识库时
-     * 才加上 search_notes（见 exploreToolsFor）。implement 才有 workspace_write。
-     * 最后固定再跑一段 summary（不给工具）：前三段的结论会被拼进它的 transcript，
-     * 由它写「这轮做了什么 / 动到的文件 / 遗留与风险」——即用户看到的收尾总结。
+     * 四段顺序交给 LangGraph。工具按意图给：explore 默认只有工作区 + git，
+     * 只有这句像在问文档/知识库时才加上 search_notes（见 exploreToolsFor）。
+     * implement 才有 workspace_write。summary 不给工具，只根据前三段结论收尾。
+     * 写入批准仍在 runOneTool 里挂起，不改成图的 interrupt。
      */
-    const stages: Array<{ role: AgentRole; tools: string[] }> = [
-      { role: 'explore', tools: exploreToolsFor(lastUser) },
-      { role: 'implement', tools: IMPLEMENT_TOOLS },
-      { role: 'review', tools: REVIEW_TOOLS },
-      { role: 'summary', tools: SUMMARY_TOOLS },
-    ]
     const stepRef = { n: 0 }
-
-    for (const stage of stages) {
-      if (signal.aborted) break
-      const history: ChatCompletionMessageParam[] = [
-        { role: 'system', content: rolePrompt(stage.role, lastUser, stage.tools) },
-        ...transcript,
-      ]
-      const text = await runRoleLive(
-        client,
-        model,
-        stage.role,
-        stage.tools,
-        history,
-        lastUser,
-        send,
-        signal,
-        tracked,
-        stepRef,
-      )
-      if (text.trim()) {
-        transcript.push({
-          role: 'assistant',
-          content: `【${stage.role}】\n${text.trim()}`,
-        })
-      }
+    const toolsFor = (role: AgentRole): string[] => {
+      if (role === 'explore') return exploreToolsFor(lastUser)
+      if (role === 'implement') return IMPLEMENT_TOOLS
+      if (role === 'summary') return SUMMARY_TOOLS
+      return REVIEW_TOOLS
     }
+
+    await runCodeTeamGraph({
+      messages: transcript,
+      lastUser,
+      signal,
+      runStage: async (role, historySoFar) => {
+        const tools = toolsFor(role)
+        const history: ChatCompletionMessageParam[] = [
+          { role: 'system', content: rolePrompt(role, lastUser, tools) },
+          ...historySoFar,
+        ]
+        return runRoleLive(
+          teamModel,
+          role,
+          tools,
+          history,
+          lastUser,
+          send,
+          signal,
+          tracked,
+          stepRef,
+        )
+      },
+    })
 
     send({ type: 'done' })
   } catch (err) {

@@ -1,0 +1,217 @@
+/* 产物预览：旁挂在右侧文档面板里，样式自成一块，不依赖 .desk 上的变量 */
+.preview {
+  --p-ink: #0f172a;
+  --p-line: #e2e8f0;
+  --p-panel: #f8fafc;
+  --p-forest: #0f766e;
+  --p-stamp: #b91c1c;
+  --p-amber: #b45309;
+  margin: 0.6rem 0.75rem;
+  border: 1px solid var(--p-line);
+  border-radius: 12px;
+  background: #ffffff;
+  overflow: hidden;
+  color: var(--p-ink);
+}
+
+.preview__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--p-panel);
+  border-bottom: 1px solid var(--p-line);
+  font-size: 0.82rem;
+}
+
+.preview__fold {
+  border: 1px solid var(--p-line);
+  background: #ffffff;
+  border-radius: 6px;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.preview__spacer {
+  flex: 1;
+}
+
+.preview__meta {
+  color: #64748b;
+  font-size: 0.74rem;
+}
+
+.preview__phase {
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.preview__phase--running {
+  background: #ccfbf1;
+  color: var(--p-forest);
+}
+
+.preview__phase--error {
+  background: #fee2e2;
+  color: var(--p-stamp);
+}
+
+.preview__phase--installing,
+.preview__phase--starting,
+.preview__phase--booting {
+  background: #fef3c7;
+  color: var(--p-amber);
+}
+
+.preview__tabs {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.preview__tabs button {
+  border: 1px solid var(--p-line);
+  background: #ffffff;
+  border-radius: 6px;
+  padding: 0.14rem 0.5rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.preview__tabs button.is-on {
+  background: var(--p-ink);
+  border-color: var(--p-ink);
+  color: #ffffff;
+}
+
+.preview__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.5rem 0.6rem 0.6rem;
+}
+
+.preview__note {
+  margin: 0;
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  background: var(--p-panel);
+  border-left: 3px solid var(--p-line);
+  font-size: 0.76rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.preview__note--warn {
+  background: #fffbeb;
+  border-left-color: var(--p-amber);
+}
+
+.preview__note--error {
+  background: #fef2f2;
+  border-left-color: var(--p-stamp);
+}
+
+.preview__note--error pre {
+  margin: 0.35rem 0;
+  max-height: 120px;
+  overflow: auto;
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.preview__note code {
+  background: rgba(15, 23, 42, 0.07);
+  padding: 0 0.2rem;
+  border-radius: 3px;
+}
+
+.preview__note button {
+  border: 1px solid var(--p-line);
+  background: #ffffff;
+  border-radius: 6px;
+  padding: 0.14rem 0.5rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.preview__frame {
+  width: 100%;
+  height: 460px;
+  border: 1px solid var(--p-line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.preview__blank {
+  padding: 1.6rem 0.6rem;
+  text-align: center;
+  color: #64748b;
+  font-size: 0.78rem;
+  background: var(--p-panel);
+  border-radius: 8px;
+}
+
+.preview__logs summary {
+  cursor: pointer;
+  font-size: 0.76rem;
+  color: #475569;
+}
+
+.preview__logs pre {
+  margin: 0.35rem 0 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 0.45rem;
+  border-radius: 6px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 0.7rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.preview__code {
+  display: grid;
+  grid-template-columns: minmax(140px, 22%) 1fr;
+  gap: 0.5rem;
+  min-height: 0;
+}
+
+.preview__files {
+  list-style: none;
+  margin: 0;
+  padding: 0.2rem;
+  max-height: 430px;
+  overflow: auto;
+  border: 1px solid var(--p-line);
+  border-radius: 8px;
+  background: var(--p-panel);
+}
+
+.preview__files button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  border-radius: 5px;
+  padding: 0.2rem 0.35rem;
+  font-size: 0.74rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview__files button.is-on {
+  background: #ffffff;
+  outline: 1px solid var(--p-forest);
+  color: var(--p-forest);
+}

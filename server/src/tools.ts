@@ -14,7 +14,14 @@ import { retrieve } from './retrieve.js'
 import { readSkill } from './skills.js'
 import { workspaceList, workspaceRead, workspaceWrite } from './workspace.js'
 import { gitDiff, gitStatus } from './git.js'
-import { callMcpTool, isMcpTool, mcpToolDefinitions } from './mcp.js'
+import {
+  callMcpTool,
+  isMcpTool,
+  mcpAskUserPayload,
+  mcpMissingRequired,
+  mcpToolDefinitions,
+  parseMcpValidationMissing,
+} from './mcp.js'
 
 /** 本地工具 + 已连接 MCP。对话循环用这个，不要只用下面的静态表。 */
 export function getToolDefinitions(): ChatCompletionTool[] {
@@ -427,7 +434,27 @@ export async function executeTool(
     }
     default:
       if (isMcpTool(name)) {
-        return await callMcpTool(name, args)
+        const missing = mcpMissingRequired(name, args)
+        if (missing.length) {
+          return await mcpAskUserPayload(name, missing, {
+            userQuery: ctx?.userQuery,
+            args,
+          })
+        }
+        try {
+          return await callMcpTool(name, args, { userQuery: ctx?.userQuery })
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          const fromErr = parseMcpValidationMissing(message)
+          if (fromErr.length) {
+            return await mcpAskUserPayload(
+              name,
+              fromErr.map((field) => ({ name: field })),
+              { userQuery: ctx?.userQuery, args },
+            )
+          }
+          throw err
+        }
       }
       throw new Error(`未知工具: ${name}`);
   }

@@ -1,15 +1,29 @@
 /**
  * 交付控制面：人点闸，Agent 只写黑板。不要把角色人设塞进 agent.ts。
  */
+import fs from 'node:fs'
 import type { SseEvent } from '../types.js'
 import { gitDiff, gitStatus } from '../git.js'
 import { executeTool } from '../tools.js'
-import { getWorkspaceRoot } from '../workspace.js'
+import { getWorkspaceRoot, withWorkspaceRoot } from '../workspace.js'
+import { collectArtifacts, diffForFiles } from './artifacts.js'
 import { runAllowedCommand } from './commands.js'
 import { refinePrd } from './draft.js'
+import { checkProjectHealth } from './health.js'
 import { implementPrd } from './implement.js'
+import { ensureProjectScaffold } from './scaffold.js'
 import { assertRoleTool, assertWritablePath } from './roles.js'
-import { getRun, resetRun, saveRun, setSeat } from './store.js'
+import {
+  bindRunWorkspace as storeBindWorkspace,
+  createRun,
+  deleteRun as storeDeleteRun,
+  getActiveId,
+  listRuns,
+  requireRun,
+  saveRun,
+  setActiveRun,
+  setSeat,
+} from './store.js'
 import {
   GateError,
   type DeliveryRole,
@@ -36,24 +50,44 @@ function requireActor(run: DeliveryRun, actor: Seat, allowed: Seat[]) {
   }
 }
 
-function requireWorkspace() {
-  const root = getWorkspaceRoot()
+/**
+ * 这条需求的仓库：绑过就用绑的，没绑回落全局默认（兼容老的单条 run 文件）。
+ * 都没有才报错——研发和测试都在这个目录里干活。
+ */
+function requireWorkspace(run?: DeliveryRun) {
+  const root = run?.workspaceRoot ?? getWorkspaceRoot()
   if (!root) {
     throw new GateError(
       'workspace',
-      '还没选仓库。上面工作区条或菜单「文件 → 打开工作区」选一个目录，研发和测试都在那个目录里干活。',
+      '还没选仓库。在这条需求上点「选仓库」，或菜单「文件 → 打开工作区」选一个目录，研发和测试都在那个目录里干活。',
     )
   }
   return root
 }
 
-function workspaceSnapshot() {
-  const root = getWorkspaceRoot()
+/** 在需求绑定的仓库作用域里跑一段同步逻辑；没绑就照走全局默认 */
+function inRunRoot<T>(run: DeliveryRun, fn: () => T): T {
+  return run.workspaceRoot ? withWorkspaceRoot(run.workspaceRoot, fn) : fn()
+}
+
+/**
+ * diff 展示顺序：源码在前，依赖清单（package.json / lock）垫后。
+ * 模型为加依赖改的 package.json diff 又长又全是版本号，顶在最前面会盖住真正的业务改动。
+ */
+function orderForDiff(files: string[]): string[] {
+  const rank = (p: string) => {
+    if (/(^|\/)(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock)$/.test(p)) return 2
+    if (/^(src|server\/src|electron)\//.test(p)) return 0
+    return 1
+  }
+  return [...files].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+}
+
+function workspaceSnapshot(run: DeliveryRun) {
+  const root = run.workspaceRoot ?? getWorkspaceRoot()
   if (!root) return { root: null, status: '', diff: '' }
   try {
-    const status = gitStatus().status
-    const diff = gitDiff().diff
-    return { root, status, diff }
+    return inRunRoot(run, () => ({ root, status: gitStatus().status, diff: gitDiff().diff }))
   } catch (err) {
     return {
       root,
@@ -63,28 +97,67 @@ function workspaceSnapshot() {
   }
 }
 
-export function currentRun() {
-  return getRun()
+export function currentRun(id?: string) {
+  return requireRun(id)
 }
 
-export function publicDelivery() {
-  const run = getRun()
-  return { ...run, workspace: workspaceSnapshot() }
+export function publicDelivery(id?: string) {
+  const run = requireRun(id)
+  return { ...run, workspace: workspaceSnapshot(run) }
 }
 
-export function startNewRun() {
-  return resetRun()
+/**
+ * 预览要的产物包：工程根下的文件 + 工程完整性结论。
+ * 两者都在这条需求绑定的仓库作用域里算，前端一次请求就够。
+ */
+export function publicDeliveryArtifacts(id?: string) {
+  const run = requireRun(id)
+  requireWorkspace(run)
+  const files = run.patch?.files ?? []
+  return inRunRoot(run, () => ({
+    ...collectArtifacts(files),
+    health: checkProjectHealth(files),
+  }))
 }
 
-export function changeSeat(seat: Seat) {
-  return setSeat(seat)
+/** 需求列表：摘要 + 当前激活哪条 */
+export function publicRuns() {
+  return { activeId: getActiveId(), runs: listRuns() }
+}
+
+export function startNewRun(input?: { workspaceRoot?: string }) {
+  return createRun(input)
+}
+
+export function activateRun(id: string) {
+  return setActiveRun(id)
+}
+
+export function deleteDeliveryRun(id: string) {
+  return storeDeleteRun(id)
+}
+
+/** 绑仓库：校验目录真实存在再落盘 */
+export function bindRunWorkspace(id: string, absRoot: string | undefined) {
+  const root = absRoot?.trim()
+  if (root) {
+    const real = fs.realpathSync(root)
+    if (!fs.statSync(real).isDirectory()) throw new Error('选的要是个目录')
+    return storeBindWorkspace(id, real)
+  }
+  return storeBindWorkspace(id, undefined)
+}
+
+export function changeSeat(seat: Seat, id?: string) {
+  return setSeat(seat, id)
 }
 
 export function updatePrd(
   actor: Seat,
   patch: Partial<Pick<Prd, 'title' | 'oneLiner' | 'body' | 'acceptance'>>,
+  id?: string,
 ) {
-  const run = getRun()
+  const run = requireRun(id)
   requireActor(run, actor, ['pm'])
   if (run.prd.confirmed) throw new GateError('frozen', '文档已冻结。先撤回确认再改。')
   if (patch.title !== undefined) run.prd.title = patch.title
@@ -103,8 +176,9 @@ export function applyGate(
   actor: Seat,
   action: GateAction,
   extra?: { reason?: string; questions?: string[] },
+  id?: string,
 ) {
-  const run = getRun()
+  const run = requireRun(id)
   const reason = extra?.reason?.trim() || ''
 
   if (action === 'confirm') {
@@ -284,11 +358,27 @@ function tapTrace(send: Send) {
   }
 }
 
-export async function runDeliveryTurn(actor: Seat, message: string, send: Send) {
-  const run = getRun()
-  requireActor(run, actor, [actor])
-  const text = message.trim()
+/** 同一时刻只让一条 turn 跑这条需求，防连点把 talk 交错写乱 */
+const inFlight = new Set<string>()
 
+export async function runDeliveryTurn(actor: Seat, message: string, send: Send, id?: string) {
+  const run = requireRun(id)
+  requireActor(run, actor, [actor])
+  if (inFlight.has(run.id)) {
+    send({ type: 'gate_blocked', gate: 'busy', message: '这条需求上一轮还在跑，等它完再发。' })
+    send({ type: 'done' })
+    return
+  }
+  inFlight.add(run.id)
+  try {
+    // 整个 phase 分派都在这条需求的仓库作用域里，实现/评审/测试各自命中对的 root
+    await inRunRoot(run, () => runTurnBody(run, actor, message.trim(), send))
+  } finally {
+    inFlight.delete(run.id)
+  }
+}
+
+async function runTurnBody(run: DeliveryRun, actor: Seat, text: string, send: Send) {
   if (run.phase === 'drafting') {
     requireActor(run, actor, ['pm'])
     send({ type: 'role_start', role: 'pm' })
@@ -318,7 +408,7 @@ export async function runDeliveryTurn(actor: Seat, message: string, send: Send) 
     requireActor(run, actor, ['dev'])
     if (!run.prd.confirmed) throw new GateError('frozen', 'PRD 未确认，不能在仓库里改代码')
     if (run.stale) throw new GateError('stale', '这次已经撤回过，run 过期了。重新确认后再改仓库。')
-    const root = requireWorkspace()
+    const root = requireWorkspace(run)
     send({ type: 'role_start', role: 'dev' })
     const tap = tapTrace(send)
     tap.send({ type: 'text_delta', delta: '开始按文档改仓库。\n' })
@@ -333,19 +423,36 @@ export async function runDeliveryTurn(actor: Seat, message: string, send: Send) 
       },
       { talk: run.talk, lastErrors: run.lastErrors ?? [] },
     )
+    // 工程骨架兜底：模型漏了 package.json 之类，这里补齐。必须在取快照之前，
+    // 补出来的文件才会被 git status 看到、进 files、进 diff、被评审看见。
+    const scaffold = ensureProjectScaffold(done.files, (rel) => {
+      const id = `scaffold-${rel}`
+      tap.send({
+        type: 'tool_start',
+        id,
+        name: 'scaffold_write',
+        arguments: JSON.stringify({ path: rel }),
+      })
+      tap.send({ type: 'tool_result', id, name: 'scaffold_write', result: `已补齐 ${rel}` })
+    })
+    for (const note of scaffold.notes) tap.send({ type: 'text_delta', delta: `\n${note}\n` })
+
     send({ type: 'meta', mode: done.live ? 'live' : 'mock' })
-    const snap = workspaceSnapshot()
-    const files = [...new Set([...(run.patch?.files ?? []), ...done.files])]
-    const diff = files
-      .map((file) => gitDiff(file).diff)
-      .filter((d) => d && d !== '(与 HEAD 无差异)')
-      .join('\n\n')
+    const snap = workspaceSnapshot(run)
+    const files = orderForDiff([
+      ...new Set([...(run.patch?.files ?? []), ...done.files, ...scaffold.written]),
+    ])
+    // 已跟踪的走 git，未跟踪的合成——空目录新建项目时后者才是全部
+    const diff = inRunRoot(run, () => diffForFiles(files, snap.status))
     run.lastErrors = done.errors
     run.patch = {
       summary: text || `按 PRD 改 ${root}`,
       files,
       status: snap.status,
       diff: diff || snap.diff,
+      ...(scaffold.written.length
+        ? { scaffold: { written: scaffold.written, missingBefore: scaffold.missingBefore } }
+        : {}),
     }
     remember(run, text || '按右边文档改选中的仓库', done.reply, tap.snapshot())
     saveRun(run)
@@ -358,7 +465,7 @@ export async function runDeliveryTurn(actor: Seat, message: string, send: Send) 
 
   if (run.phase === 'reviewing') {
     requireActor(run, actor, ['qa'])
-    requireWorkspace()
+    requireWorkspace(run)
     send({ type: 'meta', mode: 'mock' })
     send({ type: 'role_start', role: 'review' })
     const diff = gitDiff()
@@ -369,8 +476,19 @@ export async function runDeliveryTurn(actor: Seat, message: string, send: Send) 
     ]
     const path = run.patch?.files[0] || files[0] || '(未写文件)'
     const extra = files.filter((f) => f !== path)
+    // 工程完整性：只报实测到的事实，条条能指回文件。mustFix 已有的闸门语义会拦住「放行去测试」。
+    const health = checkProjectHealth(run.patch?.files ?? [])
     run.review = {
       comments: [
+        ...(health.ok
+          ? []
+          : [
+              {
+                path: health.entry ?? path,
+                risk: `工程完整性没过：这份产物起不来。${health.evidence.join('；')}`,
+                mustFix: true,
+              },
+            ]),
         {
           path,
           risk:
@@ -383,7 +501,13 @@ export async function runDeliveryTurn(actor: Seat, message: string, send: Send) 
         },
       ],
     }
-    remember(run, text || '对照仓库 diff 出评审', `意见指向 ${path}。人点放行或打回。`)
+    remember(
+      run,
+      text || '对照仓库 diff 出评审',
+      health.ok
+        ? `意见指向 ${path}。人点放行或打回。`
+        : `按实测：这份产物起不来（${health.evidence.join('；')}）。只能打回研发，或带风险放行并写理由。`,
+    )
     saveRun(run)
     send({ type: 'artifact', name: 'review', payload: run.review })
     send({ type: 'role_done', role: 'review' })
@@ -394,7 +518,7 @@ export async function runDeliveryTurn(actor: Seat, message: string, send: Send) 
 
   if (run.phase === 'testing') {
     requireActor(run, actor, ['qa'])
-    const cwd = requireWorkspace()
+    const cwd = requireWorkspace(run)
     send({ type: 'meta', mode: 'mock' })
     send({ type: 'role_start', role: 'qa' })
     const items = []
