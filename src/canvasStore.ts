@@ -17,6 +17,11 @@ export type CanvasNodeData = {
   status: 'idle' | 'running' | 'done' | 'error' | 'skip'
   output: string
   expression?: string
+  /** 检索节点：最多带回几篇，缺省 3 */
+  topK?: number
+  retrieval?: 'hybrid' | 'keyword'
+  /** 空则用画布上的提问 */
+  query?: string
 }
 
 export type SavedCanvas = {
@@ -25,7 +30,7 @@ export type SavedCanvas = {
   nodes: Array<{
     id: string
     position: { x: number; y: number }
-    data: { kind: Kind; title: string; hint: string; expression?: string }
+    data: { kind: Kind; title: string; hint: string; expression?: string; topK?: number; retrieval?: 'hybrid' | 'keyword'; query?: string }
   }>
   edges: Array<{
     id: string
@@ -45,6 +50,9 @@ function stripNode(n: Node<CanvasNodeData>) {
       title: n.data.title,
       hint: n.data.hint,
       ...(n.data.expression ? { expression: n.data.expression } : {}),
+      ...(typeof n.data.topK === 'number' ? { topK: n.data.topK } : {}),
+      ...(n.data.retrieval === 'keyword' ? { retrieval: 'keyword' as const } : {}),
+      ...(n.data.query ? { query: n.data.query } : {}),
     },
   }
 }
@@ -64,7 +72,15 @@ function parseNode(raw: unknown): Node<CanvasNodeData> | null {
   const n = raw as {
     id?: unknown
     position?: { x?: unknown; y?: unknown }
-    data?: { kind?: unknown; title?: unknown; hint?: unknown; expression?: unknown }
+    data?: {
+      kind?: unknown
+      title?: unknown
+      hint?: unknown
+      expression?: unknown
+      topK?: unknown
+      retrieval?: unknown
+      query?: unknown
+    }
   }
   if (typeof n.id !== 'string' || !n.id) return null
   if (typeof n.position?.x !== 'number' || typeof n.position?.y !== 'number') return null
@@ -81,6 +97,9 @@ function parseNode(raw: unknown): Node<CanvasNodeData> | null {
       status: 'idle',
       output: '',
       ...(typeof n.data.expression === 'string' ? { expression: n.data.expression } : {}),
+      ...(typeof n.data.topK === 'number' ? { topK: n.data.topK } : {}),
+      ...(n.data.retrieval === 'keyword' ? { retrieval: 'keyword' as const } : {}),
+      ...(typeof n.data.query === 'string' && n.data.query ? { query: n.data.query } : {}),
     },
   }
 }

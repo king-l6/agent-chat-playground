@@ -318,6 +318,7 @@ async function writeIndexFile(items: IndexItem[]): Promise<void> {
 async function persistItems(items: IndexItem[]): Promise<void> {
   memory = items
   rebuildMemoryByDoc(items)
+  clearQueryCache()
   await writeIndexFile(items)
 }
 
@@ -510,6 +511,26 @@ export async function ensureIndex(): Promise<void> {
 }
 
 /**
+ * 评测用：拿当前磁盘索引里的全部块（含 wiki 上传）。
+ * 不要再用「只切内置+手册」当默认语料——公司文档进库了却评不到。
+ */
+export async function loadIndexedItems(): Promise<
+  Array<{
+    id: string
+    docId: string
+    title: string
+    text: string
+    embedding: number[]
+  }>
+> {
+  await ensureIndex()
+  if (!memory || memory.length === 0) {
+    throw new Error('索引为空：先确认 server/data/index.json 存在，或启动一次服务让 ensureIndex 跑完')
+  }
+  return memory
+}
+
+/**
  * 手动「重新扫描」：重新对账磁盘上的文档，只重算内容变了的那些。
  * 定时器或接口都可以直接调，重复调没副作用（没变就什么都不编码）。
  */
@@ -666,6 +687,67 @@ export type RetrieveResult = {
   query_used: string
   rewrite_terms: string[]
   hits: SearchHit[]
+  /** 短 TTL 查询缓存：同一问连打两次可跳过 embed */
+  cache?: 'hit' | 'miss'
+}
+
+/** 查询结果短缓存（进程内）。不是 Redis 语义缓存：不持久、不跨进程、不做向量近邻匹配。 */
+const QUERY_CACHE_TTL_MS = 60_000
+const QUERY_CACHE_MAX = 64
+type CacheEntry = { at: number; value: RetrieveResult }
+const queryCache = new Map<string, CacheEntry>()
+
+function normalizeCacheQuery(q: string) {
+  return q
+    .toLowerCase()
+    .replace(/[\s?？!！。，,、:：;；"'“”‘’]+/g, ' ')
+    .trim()
+}
+
+function cacheKey(query: string, topK: number, userQuery: string | undefined, mode: string) {
+  return [
+    normalizeCacheQuery(query),
+    normalizeCacheQuery(userQuery ?? query),
+    topK,
+    mode,
+  ].join('\u0001')
+}
+
+function readQueryCache(key: string): RetrieveResult | null {
+  const hit = queryCache.get(key)
+  if (!hit) return null
+  if (Date.now() - hit.at > QUERY_CACHE_TTL_MS) {
+    queryCache.delete(key)
+    return null
+  }
+  // 挪到末尾当 LRU
+  queryCache.delete(key)
+  queryCache.set(key, hit)
+  return {
+    ...hit.value,
+    hits: hit.value.hits.map((h) => ({ ...h })),
+    cache: 'hit',
+  }
+}
+
+function writeQueryCache(key: string, value: RetrieveResult) {
+  if (queryCache.size >= QUERY_CACHE_MAX) {
+    const oldest = queryCache.keys().next().value
+    if (oldest !== undefined) queryCache.delete(oldest)
+  }
+  queryCache.set(key, {
+    at: Date.now(),
+    value: {
+      ...value,
+      hits: value.hits.map((h) => ({ ...h })),
+      cache: 'miss',
+    },
+  })
+}
+
+/** 索引变更后丢掉查询缓存，避免命中旧文档 */
+export function clearQueryCache() {
+  queryCache.clear()
 }
 
 /** 只编码进内存，不写 index.json。评测扫切块参数时用，避免把线上索引打乱。 */
@@ -704,7 +786,8 @@ export async function searchVectors(
 
 /** RRF：两路排名各自 1/(k+rank)，同分相加。不用把余弦和关键词分硬加成一个数。 */
 const RRF_K = 60
-const HYBRID_POOL = 10
+/** 融合池：公司 wiki 上万块时，10 太小，对的文档常卡在 7～15 名进不了 Top3 */
+const HYBRID_POOL = 40
 /** 聚合后每篇最多留几块：够拼出这一篇的上下文就行，多了会把别的篇挤掉 */
 const CHUNKS_PER_DOC = 2
 
@@ -750,8 +833,18 @@ export function fuseRrf(
 }
 
 /** 标题去掉序号和括号补充，只留正文词：「2. 我当前具备 vs 缺口（表）」→「我当前具备 vs 缺口」 */
-function titleCore(title: string): string {
+function titleCore(title: string) {
   return title.replace(/^\d+\.\s*/, '').replace(/[（(].*$/, '')
+}
+
+/**
+ * 文档可读名 + wiki 路径。切块 title 常常是「自动刷新」「前言」，
+ * 真正区分篇目的是文件名（天马降级手册 / Push线上发布流程），必须单独加权。
+ */
+function docSearchLabel(docId: string): string {
+  const meta = getDocMetaMap().get(docId)
+  if (!meta) return ''
+  return `${meta.name} ${meta.path}`.trim()
 }
 
 /**
@@ -769,21 +862,27 @@ export function titleOverlap(query: string, title: string): number {
   return hits
 }
 
+/** 问句与文档文件名/路径的重叠；比块标题更稳，专治公司 wiki */
+export function pathOverlap(query: string, docId: string): number {
+  const label = docSearchLabel(docId)
+  if (!label) return 0
+  return titleOverlap(query, label)
+}
+
 /**
  * 问句和块的字面重叠（3 字滑动窗口）。
- * 标题匹配权重大：learn 的「每天优先学」在第 5 节标题里，不在第 1 节标题里。
- * 生产里这一步常换成交叉编码器 rerank（query+chunk 成对打分）。
+ * 路径/文件名权重大于块标题，块标题大于正文前 160 字。
  */
 export function rerankScore(query: string, hit: SearchHit): number {
   const qg = new Set(charNgrams(query, 3))
   if (qg.size === 0) return 0
   let bodyHits = 0
   for (const g of charNgrams(hit.text.slice(0, 160), 3)) if (qg.has(g)) bodyHits += 1
-  return titleOverlap(query, hit.title) * 3 + bodyHits
+  return pathOverlap(query, hit.docId) * 8 + titleOverlap(query, hit.title) * 3 + bodyHits
 }
 
 function charNgrams(raw: string, n: number): string[] {
-  const t = raw.toLowerCase().replace(/[\s\d.?？!！。,，、:：;；()（）[\]《》`]/g, '')
+  const t = raw.toLowerCase().replace(/[\s\d.?？!！。,，、:：;；()（）[\]《》`「」]/g, '')
   if (t.length === 0) return []
   if (t.length < n) return [t]
   const out: string[] = []
@@ -799,28 +898,62 @@ async function hybridPool(
   const rewritten = rewriteQuery(query)
   const vec = await searchVectors(query, items, pool, 0)
   const kw = searchChunks(rewritten.rewritten, pool, items, 4)
-  return fuseRrf([vec, kw], pool, [1, 1])
+  // 文件名/路径强相关的块强行进池：否则「在线链路超时」这类短文档向量分低，永远进不了 TopK
+  const pathSeed = seedByDocPath(query, items, Math.min(pool, 20))
+  return fuseRrf([vec, kw, pathSeed], pool, [1, 1.2, 1.6])
 }
 
 /**
- * 向量原句 + 关键词改写 → RRF。标题和问句有字面重叠的往前（救 stack）。
+ * 按文档名/路径与问句的 3-gram 重叠，捞一批种子块（每篇最多 2 块）。
+ * 不替代向量，只保证「问了文件名」时候选池里真有那一篇。
+ */
+function seedByDocPath(query: string, items: IndexItem[], limit: number): SearchHit[] {
+  const scored = items
+    .map((it) => ({ it, p: pathOverlap(query, it.docId) }))
+    .filter((x) => x.p >= 4)
+    .sort((a, b) => b.p - a.p)
+
+  const out: SearchHit[] = []
+  const perDoc = new Map<string, number>()
+  for (const { it, p } of scored) {
+    const n = perDoc.get(it.docId) ?? 0
+    if (n >= 2) continue
+    perDoc.set(it.docId, n + 1)
+    out.push({
+      id: it.id,
+      docId: it.docId,
+      title: it.title,
+      text: it.text,
+      citation: out.length + 1,
+      score: p,
+    })
+    if (out.length >= limit) break
+  }
+  return out
+}
+
+/**
+ * 向量原句 + 关键词改写 → RRF。文件名/路径重叠优先（救公司 wiki）。
  */
 export async function searchHybrid(
   query: string,
   items: IndexItem[],
   topK: number,
 ): Promise<SearchHit[]> {
-  const fused = await hybridPool(query, items, Math.max(topK, HYBRID_POOL))
-  const titleHit = (h: SearchHit) => (titleOverlap(query, h.title) > 0 ? 1 : 0)
+  const fused = await hybridPool(query, items, Math.max(topK * 4, HYBRID_POOL))
+  const pathHit = (h: SearchHit) => pathOverlap(query, h.docId)
+  const titleHit = (h: SearchHit) => titleOverlap(query, h.title)
   return fused
-    .sort((a, b) => titleHit(b) - titleHit(a) || b.score - a.score)
+    .sort(
+      (a, b) =>
+        pathHit(b) - pathHit(a) || titleHit(b) - titleHit(a) || b.score - a.score,
+    )
     .slice(0, topK)
     .map((h, i) => ({ ...h, citation: i + 1 }))
 }
 
 /**
- * 在 hybrid 候选上按「原句和标题/正文的字面重叠」重排。
- * 评测里应能把 learn 从第 1 节改排到第 5 节。
+ * 在 hybrid 候选上按「路径/标题/正文字面重叠」重排。
  *
  * score 保持 RRF 融合分，字面重叠分另放 rerank：两路分混成一个数，
  * 工具卡片和模型就只能看到 0，看不出「为什么留下」。
@@ -830,11 +963,14 @@ export async function searchRerank(
   items: IndexItem[],
   topK: number,
 ): Promise<SearchHit[]> {
-  const fused = await hybridPool(query, items, Math.max(topK, HYBRID_POOL))
-  const titleTerm = (h: SearchHit) => (titleOverlap(query, h.title) > 0 ? 1 : 0)
+  const fused = await hybridPool(query, items, Math.max(topK * 4, HYBRID_POOL))
   return fused
-    .map((h) => ({ h, t: titleTerm(h), n: rerankScore(query, h) }))
-    .sort((a, b) => b.t - a.t || b.n - a.n || b.h.score - a.h.score)
+    .map((h) => ({
+      h,
+      p: pathOverlap(query, h.docId),
+      n: rerankScore(query, h),
+    }))
+    .sort((a, b) => b.p - a.p || b.n - a.n || b.h.score - a.h.score)
     .slice(0, topK)
     .map((x, i) => ({ ...x.h, citation: i + 1, rerank: x.n }))
 }
@@ -1262,11 +1398,21 @@ export async function retrieve(
   query: string,
   topK = 3,
   userQuery?: string,
+  mode: 'hybrid' | 'keyword' = 'hybrid',
 ): Promise<RetrieveResult> {
+  const key = cacheKey(query, topK, userQuery, mode)
+  const cached = readQueryCache(key)
+  if (cached) {
+    console.log(
+      `[rag] cache hit q="${normalizeCacheQuery(query).slice(0, 48)}" hits=${cached.hits.length} ttl=${QUERY_CACHE_TTL_MS}ms`,
+    )
+    return cached
+  }
+
   const rewritten = rewriteQuery(query)
   if (memory === null) await ensureIndex()
 
-  if (readyMode === 'hybrid' && memory && memory.length > 0) {
+  if (mode !== 'keyword' && readyMode === 'hybrid' && memory && memory.length > 0) {
     // 候选要比 topK 多：聚合会把同一篇的多个块并成一个名额，留够才不会缩水
     const pool = HYBRID_CANDIDATES(topK)
     const textRanked = await searchRerank(query, memory, pool)
@@ -1290,22 +1436,28 @@ export async function retrieve(
     const hits = await assembleHits(fused, topK, memory, query, userQuery)
 
     if (hits.length > 0) {
-      return {
+      const result: RetrieveResult = {
         mode: 'hybrid',
         query: rewritten.original,
         query_used: query,
         rewrite_terms: rewritten.terms,
         hits,
+        cache: 'miss',
       }
+      writeQueryCache(key, result)
+      return result
     }
   }
 
   const hits = attachDocMeta(searchChunks(rewritten.rewritten, topK))
-  return {
+  const result: RetrieveResult = {
     mode: 'keyword',
     query: rewritten.original,
     query_used: rewritten.rewritten,
     rewrite_terms: rewritten.terms,
     hits,
+    cache: 'miss',
   }
+  writeQueryCache(key, result)
+  return result
 }

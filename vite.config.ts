@@ -12,6 +12,9 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:8790',
         changeOrigin: true,
+        // 代码团队 / 长 SSE 常超过默认代理超时，否则收尾会变 Network Error
+        timeout: 0,
+        proxyTimeout: 0,
       },
     },
   },

@@ -3,7 +3,7 @@
 可下载的 **本地 Agent 交付工作台**：Electron 选仓库、产研泳道带闸门、内核仍是 SSE / 工具 / Skill / RAG / 画布。
 
 仓库：https://github.com/king-l6/agent-chat-playground  
-安装包：https://github.com/king-l6/agent-chat-playground/releases/tag/v0.1.0  
+安装包：https://github.com/king-l6/agent-chat-playground/releases/tag/v0.2.0  
 无 API Key 也能用 mock。网页和桌面都在 `#/settings` 填自己的 Key。
 
 **不是 Cursor，也不是 Dify。** 控制面是人点的确认 / 撤回 / 放行 / 签字，不是模型自己往下跳。
@@ -60,6 +60,7 @@ npm run dev
 - 桌面壳：`npm run electron:dev`（本应用窗口，不是系统浏览器）。网页模式仍是 `npm run dev`。  
   若 `electron` 命令没有二进制：`npm run electron:download`。不要和已经占用 5176 的 `npm run dev` 叠开两份 Vite。  
   打开后菜单「文件 → 打开工作区」选本仓库，再问「读一下 README.md」或「当前改了什么？」。路径逃出根目录会被拒绝；git 工具只读，不会 checkout。
+- 自检：`npm run lint`（oxlint）。
 
 Live：打开 `#/settings` 填自己的 API Key / Base URL / 模型，或切回 MOCK。网页和桌面同一页。也可以继续用 `.env` 的 `ANTHROPIC_*` / `OPENAI_*`。Embedding 走本地模型，不要把 chat 接口当成 `/embeddings`。
 

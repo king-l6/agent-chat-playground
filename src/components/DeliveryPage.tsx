@@ -11,6 +11,7 @@ import {
   type TalkTrace,
 } from '../api/delivery'
 import type { ToolCallView } from '../types'
+import { UnifiedDiff } from './CodeDiff'
 import './DeliveryPage.css'
 
 function stepTitle(name: string) {
@@ -69,6 +70,48 @@ function workDiff(run: DeliveryRun) {
   if (run.patch?.diff && run.patch.diff !== '(与 HEAD 无差异)') return run.patch.diff
   if (run.workspace?.diff && run.workspace.diff !== '(与 HEAD 无差异)') return run.workspace.diff
   return ''
+}
+
+type TimelineRole = 'pm' | 'dev' | 'review' | 'qa'
+type TimelineItem = { role: TimelineRole; status: 'pending' | 'active' | 'done' }
+
+const TIMELINE_ROLES: TimelineRole[] = ['pm', 'dev', 'review', 'qa']
+
+function roleName(role: TimelineRole) {
+  if (role === 'pm') return '产品'
+  if (role === 'dev') return '研发'
+  if (role === 'review') return '评审(测)'
+  return '测试签字'
+}
+
+function timelineFromPhase(phase: DeliveryRun['phase']): TimelineItem[] {
+  const activeIndex =
+    phase === 'drafting' || phase === 'blocked_on_pm'
+      ? 0
+      : phase === 'developing'
+        ? 1
+        : phase === 'reviewing'
+          ? 2
+          : phase === 'testing'
+            ? 3
+            : 4
+  return TIMELINE_ROLES.map((role, i) => ({
+    role,
+    status: activeIndex >= 4 || i < activeIndex ? 'done' : i === activeIndex ? 'active' : 'pending',
+  }))
+}
+
+function markRole(items: TimelineItem[], role: TimelineRole, status: 'active' | 'done'): TimelineItem[] {
+  const idx = TIMELINE_ROLES.indexOf(role)
+  return items.map((item, i) => {
+    if (item.role === role) return { ...item, status }
+    if (status === 'active' && i < idx) return { ...item, status: 'done' }
+    return item
+  })
+}
+
+function isTimelineRole(role: string): role is TimelineRole {
+  return (TIMELINE_ROLES as string[]).includes(role)
 }
 
 function processLabel(steps: ToolCallView[], live?: string) {
@@ -152,12 +195,19 @@ export function DeliveryPage() {
   const [steps, setSteps] = useState<ToolCallView[]>([])
   const [live, setLive] = useState('')
   const [waitSec, setWaitSec] = useState(0)
+  const [timeline, setTimeline] = useState<TimelineItem[] | null>(null)
+  const [stickyDiff, setStickyDiff] = useState('')
+  const [gateNote, setGateNote] = useState<{ gate: string; message: string } | null>(null)
   const threadRef = useRef<HTMLDivElement | null>(null)
   const liveBuf = useRef('')
   const livePaint = useRef(0)
 
   const reload = useCallback(async () => {
-    setRun(await fetchDelivery())
+    const next = await fetchDelivery()
+    setRun(next)
+    const diff = workDiff(next)
+    if (diff) setStickyDiff(diff)
+    return next
   }, [])
 
   useEffect(() => {
@@ -176,7 +226,10 @@ export function DeliveryPage() {
   }, [reload])
 
   useEffect(() => {
-    threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: 'smooth' })
+    const el = threadRef.current
+    if (!el) return
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (gap < 100) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }, [run?.talk?.length, busy, steps.length])
 
   useEffect(() => {
@@ -210,6 +263,9 @@ export function DeliveryPage() {
   async function onReset() {
     setError('')
     setPrompt('')
+    setStickyDiff('')
+    setGateNote(null)
+    setTimeline(null)
     setRun(await resetDelivery())
   }
 
@@ -242,8 +298,10 @@ export function DeliveryPage() {
     }
     setBusy(true)
     setError('')
+    setGateNote(null)
     setPrompt('')
     setWaitSec(0)
+    setTimeline(timelineFromPhase(run.phase))
     liveBuf.current = ''
     if (livePaint.current) cancelAnimationFrame(livePaint.current)
     livePaint.current = 0
@@ -305,12 +363,36 @@ export function DeliveryPage() {
               ),
             )
           }
-          if (event.type === 'artifact' && event.name === 'patch') {
-            setRun((prev) =>
-              prev ? { ...prev, patch: event.payload as DeliveryRun['patch'] } : prev,
-            )
+          if (event.type === 'role_start' && isTimelineRole(event.role)) {
+            setTimeline((prev) => markRole(prev ?? timelineFromPhase(base.phase), event.role, 'active'))
           }
-          if (event.type === 'gate_blocked') setError(event.message)
+          if (event.type === 'role_done' && isTimelineRole(event.role)) {
+            setTimeline((prev) => markRole(prev ?? timelineFromPhase(base.phase), event.role, 'done'))
+          }
+          if (event.type === 'artifact') {
+            setRun((prev) => {
+              if (!prev) return prev
+              if (event.name === 'prd') return { ...prev, prd: event.payload as DeliveryRun['prd'] }
+              if (event.name === 'patch') return { ...prev, patch: event.payload as DeliveryRun['patch'] }
+              if (event.name === 'review') return { ...prev, review: event.payload as DeliveryRun['review'] }
+              if (event.name === 'test_report') {
+                return { ...prev, test_report: event.payload as DeliveryRun['test_report'] }
+              }
+              return prev
+            })
+            if (event.name === 'patch') {
+              const patch = event.payload as DeliveryRun['patch']
+              if (patch?.diff && patch.diff !== '(与 HEAD 无差异)') setStickyDiff(patch.diff)
+            }
+          }
+          if (event.type === 'tool_result' && event.name === 'workspace_write') {
+            void fetchDelivery().then((next) => {
+              setRun(next)
+              const diff = workDiff(next)
+              if (diff) setStickyDiff(diff)
+            })
+          }
+          if (event.type === 'gate_blocked') setGateNote({ gate: event.gate, message: event.message })
           if (event.type === 'error') setError(event.message)
         },
       })
@@ -322,6 +404,7 @@ export function DeliveryPage() {
       setBusy(false)
       setSteps([])
       setLive('')
+      setTimeline(null)
     }
   }
 
@@ -347,7 +430,8 @@ export function DeliveryPage() {
   const needsRepo =
     (dev && run.phase === 'developing') ||
     (qa && (run.phase === 'reviewing' || run.phase === 'testing'))
-  const diff = workDiff(run)
+  const diff = stickyDiff || workDiff(run)
+  const shownTimeline = timeline ?? timelineFromPhase(run.phase)
 
   const composer = (
     <form
@@ -416,17 +500,22 @@ export function DeliveryPage() {
       )}
       {dev && run.lastErrors && run.lastErrors.length > 0 && (
         <div className="work__fails">
-          <strong>还没写成</strong>
-          {run.lastErrors.map((err) => (
-            <p key={err}>{err}</p>
-          ))}
+          <strong>还没写成 · {run.lastErrors.length}</strong>
+          <ul>
+            {run.lastErrors.map((err) => (
+              <li key={err}>{err}</li>
+            ))}
+          </ul>
         </div>
       )}
       {diff ? (
-        <details className="desk__process">
-          <summary>文件变更</summary>
-          <pre>{diff.slice(0, 2500)}</pre>
-        </details>
+        <div className="desk__diff-panel">
+          <div className="desk__diff-head">
+            文件变更
+            {diff.length > 8000 ? <span> · 预览截断</span> : null}
+          </div>
+          <UnifiedDiff text={diff.slice(0, 8000)} height={360} />
+        </div>
       ) : null}
       {run.review?.comments.map((c) => (
         <p key={c.path}>
@@ -557,12 +646,23 @@ export function DeliveryPage() {
             </button>
           ))}
         </div>
+        <ol className="desk__timeline" aria-label="角色进度">
+          {shownTimeline.map((item) => (
+            <li
+              key={item.role}
+              className={`desk__tl desk__tl--${item.status}`}
+            >
+              {roleName(item.role)}
+            </li>
+          ))}
+        </ol>
         <div className="desk__now">
           <strong>{status.title}</strong>
           <p>{status.body}</p>
         </div>
       </div>
 
+      {gateNote && <div className="desk__gate">{gateNote.message}</div>}
       {error && <div className="desk__err">{error}</div>}
       {run.stale && pm && <div className="desk__warn">这次撤回过。重新确认后，研发才能再改。</div>}
       {needsRepo && !root && <div className="desk__warn">先在上面选一个目录，再让 AI 改仓库。</div>}

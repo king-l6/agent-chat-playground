@@ -1,46 +1,394 @@
 /**
- * 消息列表：渲染用户/助手气泡，以及中间的工具卡片
+ * 消息列表：渲染用户/助手气泡，以及中间的工具卡片和引用来源
  */
+import { useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { ToolCallView, UiMessage } from '../types'
+import type { AgentRole, ToolApproveHandler, ToolCallView, UiMessage } from '../types'
+import {
+  groupCitationsByDoc,
+  parseCitationHitsFromTools,
+  type CitationHit,
+} from '../lib/citations'
+import { formatScore, stepLabel } from '../lib/toolView'
 import { CitationMarkdown } from './CitationMarkdown'
 import { ChatImage } from './ChatImage'
 import { ToolCard } from './ToolCard'
 import './MessageList.css'
 
-function MessageProcess({ tools, streaming }: { tools: ToolCallView[]; streaming: boolean }) {
+/**
+ * 角色名 → 中文短标签。
+ * 名单必须覆盖 src/types.ts 的 AgentRole 全集：漏掉一个，正文里就会掉出
+ * 英文小条（原来 summary 没写，页面上直接显示「summary · 完成」）。
+ */
+function roleLabel(role: AgentRole) {
+  if (role === 'explore') return '探索'
+  if (role === 'implement') return '改码'
+  if (role === 'review') return '评审'
+  if (role === 'summary') return '总结'
+  if (role === 'pm') return '产品'
+  if (role === 'dev') return '研发'
+  if (role === 'qa') return '测试'
+  return role
+}
+
+/**
+ * 代码团队在气泡顶部画进度格的角色顺序。
+ *
+ * 后端 codeTeam.ts 的 stages 是 explore → implement → review → summary **四段**，
+ * 这里少写一个就会「跑完了但进度条上没这一格」——之前 summary 不在名单里，
+ * 用户的体感正是「改完之后没有总结」。加角色时两边一起改。
+ */
+const TEAM_ROLES: AgentRole[] = ['explore', 'implement', 'review', 'summary']
+
+function teamPipeline(parts: UiMessage['parts']) {
+  const state = new Map<AgentRole, 'pending' | 'active' | 'done'>()
+  for (const role of TEAM_ROLES) state.set(role, 'pending')
+  for (const part of parts ?? []) {
+    if (part.type !== 'role' || !TEAM_ROLES.includes(part.role)) continue
+    if (part.phase === 'start') state.set(part.role, 'active')
+    if (part.phase === 'done') state.set(part.role, 'done')
+  }
+  return TEAM_ROLES.map((role) => ({ role, status: state.get(role) ?? 'pending' }))
+}
+
+function TeamStrip({ message }: { message: UiMessage }) {
+  const pipe = teamPipeline(message.parts)
+  if (!pipe.some((p) => p.status !== 'pending')) return null
+  return (
+    <ol className="msg__team" aria-label="代码团队进度">
+      {pipe.map((item, i) => (
+        <li key={item.role} className={`msg__team-item msg__team-item--${item.status}`}>
+          {i > 0 && <span className="msg__team-arrow" aria-hidden>→</span>}
+          {roleLabel(item.role)}
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+function groupSteps(tools: ToolCallView[]) {
+  const groups: Array<{ step: number; tools: ToolCallView[] }> = []
+  for (const tool of tools) {
+    const step = tool.step ?? 1
+    const last = groups[groups.length - 1]
+    if (last && last.step === step) last.tools.push(tool)
+    else groups.push({ step, tools: [tool] })
+  }
+  return groups
+}
+
+function StepBlocks({
+  tools,
+  cited,
+  onApprove,
+}: {
+  tools: ToolCallView[]
+  cited: Set<number> | null
+  onApprove?: ToolApproveHandler
+}) {
+  const groups = groupSteps(tools)
+  return (
+    <>
+      {groups.map((group) => (
+        <div key={group.step} className="msg__step">
+          <p className="msg__process-head">
+            第 {group.step} 步 · {stepLabel(group.tools)}
+          </p>
+          {group.tools.map((tool) => (
+            <ToolCard key={tool.id} tool={tool} cited={cited} onApprove={onApprove} />
+          ))}
+        </div>
+      ))}
+    </>
+  )
+}
+
+function MessageProcess({
+  tools,
+  streaming,
+  cited,
+  onApprove,
+}: {
+  tools: ToolCallView[]
+  streaming: boolean
+  cited: Set<number> | null
+  onApprove?: ToolApproveHandler
+}) {
   if (!tools.length) return null
-  const running = streaming || tools.some((t) => t.status === 'running')
-  const cards = tools.map((tool) => <ToolCard key={tool.id} tool={tool} />)
+  const running =
+    streaming || tools.some((t) => t.status === 'running' || t.status === 'awaiting_approval')
   if (running) {
     return (
       <div className="msg__process msg__process--on">
-        <p className="msg__process-head">正在执行</p>
-        {cards}
+        <StepBlocks tools={tools} cited={cited} onApprove={onApprove} />
       </div>
     )
   }
+  const steps = groupSteps(tools).length
   return (
     <details className="msg__process">
-      <summary>中间步骤 · {tools.length}</summary>
-      {cards}
+      <summary>
+        {steps > 1 ? `${steps} 步` : '1 步'} · {tools.length} 个工具
+      </summary>
+      <StepBlocks tools={tools} cited={cited} onApprove={onApprove} />
     </details>
   )
 }
 
+function sourceHref(hit: CitationHit) {
+  if (hit.docPath) return `#/documents?path=${encodeURIComponent(hit.docPath)}`
+  if (hit.docId) return `#/vectors?doc=${encodeURIComponent(hit.docId)}`
+  return null
+}
+
+function citationNumbers(content: string) {
+  const set = new Set<number>()
+  const re = /\[(\d+)\]/g
+  let match: RegExpExecArray | null
+  while ((match = re.exec(content))) set.add(Number(match[1]))
+  return set
+}
+
+function formatMs(ms: number | undefined) {
+  if (ms == null) return ''
+  if (ms < 1000) return `${ms} ms`
+  return `${(ms / 1000).toFixed(1)} s`
+}
+
+function MessageTiming({ message }: { message: UiMessage }) {
+  if (message.ttftMs == null && message.totalMs == null) return null
+  return (
+    <div className="msg__timing">
+      {message.ttftMs != null && <span>首字 {formatMs(message.ttftMs)}</span>}
+      {message.totalMs != null && <span>整轮 {formatMs(message.totalMs)}</span>}
+    </div>
+  )
+}
+
+function SourceStrip({
+  tools,
+  content,
+  done,
+}: {
+  tools: ToolCallView[]
+  content: string
+  done: boolean
+}) {
+  const hits = useMemo(() => {
+    return Array.from(parseCitationHitsFromTools(tools).values()).sort((a, b) => a.citation - b.citation)
+  }, [tools])
+  const cited = useMemo(() => citationNumbers(content), [content])
+  const [openKey, setOpenKey] = useState<string | null>(null)
+  if (hits.length === 0) return null
+  const usedHits = done ? hits.filter((hit) => cited.has(hit.citation)) : hits
+  const unusedHits = done ? hits.filter((hit) => !cited.has(hit.citation)) : []
+  const usedDocs = groupCitationsByDoc(usedHits)
+  const unusedDocs = groupCitationsByDoc(unusedHits)
+  const openDoc =
+    usedDocs.find((d) => d.key === openKey) ??
+    unusedDocs.find((d) => d.key === openKey) ??
+    null
+  const href = openDoc?.hits[0] ? sourceHref(openDoc.hits[0]) : null
+
+  const renderDocs = (docs: ReturnType<typeof groupCitationsByDoc>) => (
+    <div className="sources__row">
+      {docs.map((doc) => (
+        <button
+          key={doc.key}
+          type="button"
+          className={openKey === doc.key ? 'source source--on' : 'source'}
+          onClick={() => setOpenKey(openKey === doc.key ? null : doc.key)}
+        >
+          <span className="source__n">{doc.hits.length}</span>
+          <span className="source__name">{doc.docName}</span>
+        </button>
+      ))}
+    </div>
+  )
+
+  return (
+    <div className="sources">
+      {usedDocs.length > 0 && (
+        <>
+          <div className="sources__label">引用来源 · {usedDocs.length} 篇</div>
+          {renderDocs(usedDocs)}
+        </>
+      )}
+      {unusedDocs.length > 0 && (
+        <details className="sources__unused">
+          <summary>检索到但回答没用 · {unusedDocs.length} 篇</summary>
+          {renderDocs(unusedDocs)}
+        </details>
+      )}
+      {openDoc && (
+        <div className="sources__detail">
+          {href ? <a href={href}>{openDoc.docName}</a> : <strong>{openDoc.docName}</strong>}
+          {openDoc.hits.map((hit) => {
+            const score = formatScore(hit.score)
+            const rerank = formatScore(hit.rerank)
+            const meta = [
+              `[${hit.citation}]`,
+              score ? `融合 ${score}` : '',
+              rerank ? `重排 ${rerank}` : '',
+            ]
+              .filter(Boolean)
+              .join(' · ')
+            return (
+              <div key={hit.citation} className="sources__seg">
+                <div className="sources__seg-meta">{meta}</div>
+                {hit.title !== openDoc.docName && <strong>{hit.title}</strong>}
+                {hit.imageUrl && <ChatImage src={hit.imageUrl} alt={hit.title} />}
+                {hit.snippet && <p>{hit.snippet}</p>}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+type BodyRun =
+  | { kind: 'text'; text: string }
+  | { kind: 'reasoning'; text: string }
+  | { kind: 'tools'; tools: ToolCallView[] }
+  | { kind: 'role'; role: AgentRole; phase: 'start' | 'done' }
+
+function bodyRuns(message: UiMessage): BodyRun[] {
+  if (!message.parts) {
+    const runs: BodyRun[] = []
+    if (message.tools.length) runs.push({ kind: 'tools', tools: message.tools })
+    if (message.content) runs.push({ kind: 'text', text: message.content })
+    return runs
+  }
+  const byId = new Map(message.tools.map((tool) => [tool.id, tool]))
+  const runs: BodyRun[] = []
+  for (const part of message.parts) {
+    if (part.type === 'role') {
+      runs.push({ kind: 'role', role: part.role, phase: part.phase })
+      continue
+    }
+    if (part.type === 'tool') {
+      const tool = byId.get(part.id)
+      if (!tool) continue
+      const last = runs[runs.length - 1]
+      if (last?.kind === 'tools') last.tools.push(tool)
+      else runs.push({ kind: 'tools', tools: [tool] })
+      continue
+    }
+    runs.push(
+      part.type === 'text'
+        ? { kind: 'text', text: part.text }
+        : { kind: 'reasoning', text: part.text },
+    )
+  }
+  return runs
+}
+
+function AssistantBody({
+  message,
+  onApprove,
+}: {
+  message: UiMessage
+  onApprove?: ToolApproveHandler
+}) {
+  const streaming = message.status === 'streaming'
+  const cited = streaming ? null : citationNumbers(message.content)
+  const runs = bodyRuns(message)
+  const waiting =
+    streaming &&
+    runs.length === 0 &&
+    message.tools.every((tool) => tool.status !== 'running' && tool.status !== 'awaiting_approval')
+  return (
+    <>
+      <TeamStrip message={message} />
+      {waiting && <div className="msg__content muted">思考中…</div>}
+      {runs.map((run, index) => {
+        const last = index === runs.length - 1
+        if (run.kind === 'role') {
+          if (run.phase === 'done') {
+            return (
+              <div
+                key={index}
+                className={`msg__role-bar msg__role-bar--${run.role} msg__role-bar--done`}
+              >
+                {roleLabel(run.role)} · 完成
+              </div>
+            )
+          }
+          return (
+            <div key={index} className={`msg__role-bar msg__role-bar--${run.role}`}>
+              {roleLabel(run.role)} · 进行中
+            </div>
+          )
+        }
+        if (run.kind === 'reasoning') {
+          return (
+            <details key={index} className="msg__reason">
+              <summary>{streaming && last ? '思考中…' : '思考'}</summary>
+              <div>{run.text}</div>
+            </details>
+          )
+        }
+        if (run.kind === 'tools') {
+          return (
+            <MessageProcess
+              key={index}
+              tools={run.tools}
+              streaming={streaming && last}
+              cited={cited}
+              onApprove={onApprove}
+            />
+          )
+        }
+        return (
+          <div key={index} className="msg__content">
+            <CitationMarkdown content={run.text} tools={message.tools} />
+            {streaming && last && <span className="caret" />}
+          </div>
+        )
+      })}
+      <SourceStrip tools={message.tools} content={message.content} done={!streaming} />
+      <MessageTiming message={message} />
+    </>
+  )
+}
+
 /** 接收整个 messages 数组，按条画文章气泡 */
-export function MessageList({ messages }: { messages: UiMessage[] }) {
+export function MessageList({
+  messages,
+  onApprove,
+  codeTeam = false,
+}: {
+  messages: UiMessage[]
+  onApprove?: ToolApproveHandler
+  codeTeam?: boolean
+}) {
   // 还没聊过：显示空状态引导
   if (messages.length === 0) {
     return (
       <div className="empty">
-        <h2>Agent Chat Playground</h2>
-        <p>流式对话 + 工具卡片 + 已连接 Skill。无 API Key 也能用 mock 演示。</p>
+        <h2>{codeTeam ? '代码团队' : 'Agent Chat Playground'}</h2>
+        <p>
+          {codeTeam
+            ? '探索 → 改码 → 评审 → 总结。写文件前会停住等人批准（对齐 OpenHands / OMA）。先连底部工作区。'
+            : '流式对话 + 工具卡片 + 已连接 Skill。无 API Key 也能用 mock 演示。'}
+        </p>
         <ul>
-          <li>现在几点了？（只调工具）</li>
-          <li>这个项目的技术栈是什么？（只检索）</li>
-          <li>请按面试口径介绍这个项目（先 load skill 再检索）</li>
+          {codeTeam ? (
+            <>
+              <li>看一下这个仓库怎么组织的（探索摸底）</li>
+              <li>给 README 加一句项目说明（改码要批准）</li>
+              <li>当前改了什么？（评审看 diff）</li>
+            </>
+          ) : (
+            <>
+              <li>现在几点了？（只调工具）</li>
+              <li>这个项目的技术栈是什么？（只检索）</li>
+              <li>请按面试口径介绍这个项目（先 load skill 再检索）</li>
+            </>
+          )}
         </ul>
       </div>
     )
@@ -49,32 +397,22 @@ export function MessageList({ messages }: { messages: UiMessage[] }) {
   return (
     <div className="message-list">
       {messages.map((m) => (
-        <article key={m.id} className={`msg msg--${m.role}`}>
+        /* data-msg-id 是右侧「提问目录」（ChatOutline）的跳转锚点，改名要同步那边 */
+        <article key={m.id} data-msg-id={m.id} className={`msg msg--${m.role}`}>
           {/* 角色标签 */}
-          <div className="msg__role">{m.role === 'user' ? '你' : '助手'}</div>
+          <div className="msg__role">
+            {m.role === 'user' ? '你' : codeTeam || teamPipeline(m.parts).some((p) => p.status !== 'pending') ? '代码团队' : '助手'}
+          </div>
 
-          <MessageProcess tools={m.tools} streaming={m.status === 'streaming'} />
-
-          {m.content ? (
+          {m.role === 'assistant' ? (
+            <AssistantBody message={m} onApprove={onApprove} />
+          ) : m.content ? (
             <div className="msg__content">
-              {m.role === 'assistant' ? (
-                /* 助手：解析 [1][2] 角标，数据来自同条消息里的 search_notes */
-                <CitationMarkdown content={m.content} tools={m.tools} />
-              ) : (
-                /* 用户消息现在也能贴图（比如把一条图片地址丢进来） */
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ img: ChatImage }}>
-                  {m.content}
-                </ReactMarkdown>
-              )}
-              {m.status === 'streaming' && <span className="caret" />}
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ img: ChatImage }}>
+                {m.content}
+              </ReactMarkdown>
             </div>
-          ) : (
-            // 还没文字、也没有正在跑的工具：显示「思考中」
-            m.status === 'streaming' &&
-            m.tools.every((t) => t.status !== 'running') && (
-              <div className="msg__content muted">思考中…</div>
-            )
-          )}
+          ) : null}
         </article>
       ))}
     </div>

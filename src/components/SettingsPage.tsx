@@ -14,14 +14,49 @@ import {
 import './KnowledgePage.css'
 import './SettingsPage.css'
 
+/**
+ * 业内常见窗口档位（token），只用于上下文窗口输入框的 datalist 提示。
+ *
+ * 它是**量级参考，不是「模型名 → 窗口」的映射表**：不绑定任何模型，
+ * 只回答「该填多大才不离谱」。具体型号的真实窗口要问网关或看官方文档——
+ * 本项目的模型名是自由文本（占位 deepseek-v4-flash），后端也没有可查的表。
+ *
+ * 与下面两处是**文本对偶**，改一处要同步（前端不能 import server 常量，两套构建）：
+ *   - server/src/settings.ts 的 DEFAULT_CONTEXT_WINDOW / MAX_CONTEXT_WINDOW 注释
+ *   - .env.example 里 CONTEXT_WINDOW_TOKENS 的档位说明
+ */
+const CONTEXT_WINDOW_PRESETS = [
+  { tokens: '8000', label: '早期档（8k/16k，放不下本项目 system prompt + 工具 schema）' },
+  { tokens: '32000', label: '上一代主流档；留空时的兜底值' },
+  { tokens: '64000', label: '上一代长档' },
+  { tokens: '128000', label: '现在 API 最常见档' },
+  { tokens: '200000', label: 'Claude 系列常见档' },
+  { tokens: '1000000', label: '长上下文档（Gemini 1.5/2.x、GPT-4.1 一类）' },
+  { tokens: '2000000', label: '当前公开上限档，也是本项目允许的上界' },
+]
+
 export function SettingsPage(props: {
-  onSaved?: (next: { mode: 'mock' | 'live'; model: string }) => void
+  /**
+   * 保存成功后的回调。
+   * contextWindow 必须一起交出去：对话页的用量环拿它当分母，
+   * 而 App 只在挂载时拉过一次 /api/health（依赖 []），不回调的话
+   * 改完窗口回对话页看到的还是旧分母（要刷新整页才生效）。
+   */
+  onSaved?: (next: { mode: 'mock' | 'live'; model: string; contextWindow: number }) => void
   onMcpSaved?: (next: McpPublic) => void
 }) {
   const [mode, setMode] = useState<'mock' | 'live'>('mock')
   const [apiKey, setApiKey] = useState('')
   const [baseURL, setBaseURL] = useState('')
   const [model, setModel] = useState('')
+  /**
+   * 上下文窗口（token）。表单里是字符串（输入框原样），提交时才转数字。
+   * 后端认「不传 = 不动」「空/0/乱写 = 清掉，回落环境变量或 32k」，
+   * 所以这里用 windowTouched 区分「用户没碰」和「用户清空了」——不区分的话，
+   * 每次保存都会把环境变量里的值写死进 llm.json。
+   */
+  const [contextWindow, setContextWindow] = useState('')
+  const [windowTouched, setWindowTouched] = useState(false)
   const [hasKey, setHasKey] = useState(false)
   const [error, setError] = useState('')
   const [hint, setHint] = useState('')
@@ -40,6 +75,9 @@ export function SettingsPage(props: {
         setBaseURL(data.baseURL)
         setModel(data.model)
         setHasKey(data.hasKey)
+        // 后端已经算好优先级了（面板 → 环境变量 → 32k），这里只负责显示
+        setContextWindow(String(data.contextWindow))
+        setWindowTouched(false)
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
     fetchMcp()
@@ -62,14 +100,25 @@ export function SettingsPage(props: {
         apiKey: apiKey.trim() || undefined,
         baseURL,
         model,
+        // 没用碰过这个框就整个字段都不带，免得把「环境变量来的值」写死进 llm.json
+        ...(windowTouched
+          ? { contextWindow: contextWindow.trim() ? Number(contextWindow) : 0 }
+          : {}),
       })
       setApiKey('')
       setHasKey(saved.hasKey)
       setBaseURL(saved.baseURL)
       setModel(saved.model)
       setMode(saved.mode)
+      setContextWindow(String(saved.contextWindow))
+      setWindowTouched(false)
       setHint(saved.mode === 'mock' ? '已保存，当前是 MOCK。' : '已保存，当前走真实模型。')
-      props.onSaved?.({ mode: saved.mode, model: saved.model })
+      // saved.contextWindow 是后端 resolveContextWindow 的结果：没碰输入框也一定有值
+      props.onSaved?.({
+        mode: saved.mode,
+        model: saved.model,
+        contextWindow: saved.contextWindow,
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -199,6 +248,27 @@ export function SettingsPage(props: {
               placeholder="deepseek-v4-flash"
             />
           </label>
+          <label className="settings__field">
+            上下文窗口（token）。留空 = 默认 32k（上一代档，偏保守）；业内常见 128k / 200k
+            <input
+              type="text"
+              inputMode="numeric"
+              list="context-window-presets"
+              value={contextWindow}
+              onChange={(e) => {
+                setWindowTouched(true)
+                setContextWindow(e.target.value)
+              }}
+              placeholder="32000（常见 128000 / 200000）"
+            />
+          </label>
+          <datalist id="context-window-presets">
+            {CONTEXT_WINDOW_PRESETS.map((preset) => (
+              <option key={preset.tokens} value={preset.tokens}>
+                {preset.label}
+              </option>
+            ))}
+          </datalist>
 
           <button type="submit" className="settings__save" disabled={busy}>
             {busy ? '保存中…' : '保存'}

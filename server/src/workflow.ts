@@ -13,18 +13,74 @@ export type PipelineStep = {
   id: string
   kind: WorkflowKind
   expression?: string
+  /** 检索节点的篇数上限，缺省 3，和对话里的 search_notes 一致 */
+  topK?: number
+  /** Dify RetrievalMethod：hybrid_search 或 keyword_search。缺省混合 */
+  retrieval?: 'hybrid' | 'keyword'
+  /** 非空时不用用户原句，当作这个节点自己的 query */
+  query?: string
+}
+
+export type WorkflowTrace = {
+  retrieval?: string
+  query?: string
+  rewriteTerms?: string[]
+  hits?: Array<{ citation: number; title: string; score?: number; rerank?: number }>
 }
 
 export type WorkflowStep = {
   id: string
   output: string
+  ms: number
+  trace?: WorkflowTrace
+}
+
+export type WorkflowHooks = {
+  onStart?: (id: string) => void
+  onDone?: (step: WorkflowStep) => void
+}
+
+function clampTopK(value: number | undefined) {
+  if (value == null || !Number.isFinite(value)) return 3
+  return Math.min(8, Math.max(1, Math.round(value)))
 }
 
 function formatHits(retrieved: RetrieveResult) {
-  if (!retrieved.hits.length) return '未命中'
-  return retrieved.hits
-    .map((h) => `[${h.citation}] ${h.title}\n${(h.context ?? h.text).slice(0, 280)}`)
+  const head = [
+    retrieved.mode === 'hybrid' ? '向量 + 关键词' : '关键词',
+    retrieved.rewrite_terms.length
+      ? `改写 ${retrieved.rewrite_terms.slice(0, 8).join(' ')}`
+      : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  if (!retrieved.hits.length) return `${head}\n未命中`
+  const body = retrieved.hits
+    .map((h) => {
+      const meta = [
+        typeof h.score === 'number' ? `融合 ${h.score}` : '',
+        typeof h.rerank === 'number' ? `重排 ${h.rerank}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ')
+      return `[${h.citation}] ${h.title}${meta ? `  ${meta}` : ''}\n${(h.context ?? h.text).slice(0, 180)}`
+    })
     .join('\n\n')
+  return `${head}\n\n${body}`
+}
+
+function searchTrace(retrieved: RetrieveResult): WorkflowTrace {
+  return {
+    retrieval: retrieved.mode,
+    query: retrieved.query_used || retrieved.query,
+    rewriteTerms: retrieved.rewrite_terms,
+    hits: retrieved.hits.slice(0, 5).map((h) => ({
+      citation: h.citation,
+      title: h.title,
+      score: h.score,
+      rerank: h.rerank,
+    })),
+  }
 }
 
 async function generateAnswer(
@@ -73,6 +129,7 @@ async function generateAnswer(
 export async function runWorkflow(
   question: string,
   pipeline: PipelineStep[],
+  hooks?: WorkflowHooks,
 ): Promise<{ steps: WorkflowStep[]; answer: string }> {
   const q = question.trim().slice(0, 2000)
   const steps: WorkflowStep[] = []
@@ -80,10 +137,28 @@ export async function runWorkflow(
   let extra = ''
   let answer = ''
 
+  const finish = (step: WorkflowStep) => {
+    steps.push(step)
+    hooks?.onDone?.(step)
+  }
+
   for (const step of pipeline) {
+    const started = Date.now()
+    hooks?.onStart?.(step.id)
     if (step.kind === 'search') {
-      retrieved = await retrieve(q, 3)
-      steps.push({ id: step.id, output: formatHits(retrieved) })
+      const query = String(step.query ?? '').trim() || q
+      retrieved = await retrieve(
+        query,
+        clampTopK(step.topK),
+        q,
+        step.retrieval === 'keyword' ? 'keyword' : 'hybrid',
+      )
+      finish({
+        id: step.id,
+        output: formatHits(retrieved),
+        ms: Date.now() - started,
+        trace: searchTrace(retrieved),
+      })
     } else if (step.kind === 'calc') {
       const expression = String(step.expression ?? '').trim() || '123*456'
       const output = await executeTool(
@@ -91,10 +166,10 @@ export async function runWorkflow(
         JSON.stringify({ expression }),
       )
       extra = extra ? `${extra}\n${output}` : output
-      steps.push({ id: step.id, output })
+      finish({ id: step.id, output, ms: Date.now() - started })
     } else if (step.kind === 'answer') {
       answer = await generateAnswer(q, retrieved, extra)
-      steps.push({ id: step.id, output: answer })
+      finish({ id: step.id, output: answer, ms: Date.now() - started })
     }
   }
 

@@ -9,13 +9,19 @@ import fs from 'node:fs'
 import path from 'node:path'
 import multer from 'multer'
 import { resolveLlmConfig, runAgentChat } from './agent.js'
+import { settleApproval, runCodeTeamChat } from './codeTeam.js'
 import {
   importClaudeMcp,
   publicMcp,
   reconnectMcp,
   saveMcpSettings,
 } from './mcp.js'
-import { publicLlmSettings, saveLlmSettings, type LlmMode } from './settings.js'
+import {
+  publicLlmSettings,
+  resolveContextWindow,
+  saveLlmSettings,
+  type LlmMode,
+} from './settings.js'
 import { IMAGE_ROUTE, imageFileById, isImageId, mimeOf } from './imageCache.js'
 import {
   applyGate,
@@ -116,6 +122,12 @@ app.get('/api/health', (_req, res) => {
     ok: true,
     mode: apiKey ? 'live' : 'mock',
     model,
+    /*
+     * 前端「上下文用量」环的分母（token）。
+     * 优先级（面板 → 环境变量 → 32k 兜底）只在 settings.resolveContextWindow 里算一次，
+     * 这里不重复判断，前端也不自己猜。
+     */
+    contextWindow: resolveContextWindow(),
     rag: getRagStatus(),
     skills: listSkills(),
     mcp: publicMcp(),
@@ -609,6 +621,17 @@ app.get('/api/settings', (_req, res) => {
   res.json(publicLlmSettings())
 })
 
+/**
+ * 面板传来的上下文窗口：数字或数字串都收。
+ * 不传 / 传 null → undefined（＝不动这个字段）；空串、0、乱写 → 数字，由
+ * settings.saveLlmSettings 按「收不成正整数就清掉、回落环境变量或默认」处理。
+ */
+function parseContextWindow(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0
+  if (typeof value === 'string') return Number(value.trim() || 0)
+  return undefined
+}
+
 app.put('/api/settings', (req, res) => {
   const mode = req.body?.mode
   if (mode !== 'mock' && mode !== 'live') {
@@ -621,6 +644,8 @@ app.put('/api/settings', (req, res) => {
       apiKey: typeof req.body?.apiKey === 'string' ? req.body.apiKey : undefined,
       baseURL: typeof req.body?.baseURL === 'string' ? req.body.baseURL : undefined,
       model: typeof req.body?.model === 'string' ? req.body.model : undefined,
+      // 原样透传：undefined 语义就是「不改」，别在这里填默认值
+      contextWindow: parseContextWindow(req.body?.contextWindow),
     })
     res.json(saved)
   } catch (err) {
@@ -1290,13 +1315,26 @@ app.post('/api/workflow/run', async (req, res) => {
     ? raw
         .map((item: unknown): PipelineStep | null => {
           if (!item || typeof item !== 'object') return null
-          const rec = item as { id?: unknown; kind?: unknown; expression?: unknown }
+          const rec = item as {
+            id?: unknown
+            kind?: unknown
+            expression?: unknown
+            topK?: unknown
+            retrieval?: unknown
+            query?: unknown
+          }
           const kind = rec.kind
           if (kind !== 'search' && kind !== 'answer' && kind !== 'calc') return null
+          const topK = Number(rec.topK)
+          const retrieval = rec.retrieval === 'keyword' ? 'keyword' : rec.retrieval === 'hybrid' ? 'hybrid' : undefined
+          const query = typeof rec.query === 'string' ? rec.query : undefined
           return {
             id: String(rec.id ?? kind),
             kind,
             expression: rec.expression != null ? String(rec.expression) : undefined,
+            ...(Number.isFinite(topK) ? { topK } : {}),
+            ...(retrieval ? { retrieval } : {}),
+            ...(query ? { query } : {}),
           }
         })
         .filter((s): s is PipelineStep => s != null)
@@ -1306,6 +1344,34 @@ app.post('/api/workflow/run', async (req, res) => {
       ]
   if (pipeline.length === 0) {
     res.status(400).json({ error: '请从「提问」连出至少一步' })
+    return
+  }
+  if (req.body?.stream === true) {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')
+    res.flushHeaders?.()
+    let closed = false
+    res.on('close', () => {
+      closed = true
+    })
+    const send = (event: unknown) => {
+      if (closed || res.writableEnded) return
+      res.write(`data: ${JSON.stringify(event)}\n\n`)
+    }
+    try {
+      const result = await runWorkflow(question, pipeline, {
+        onStart: (id) => send({ type: 'step_start', id }),
+        onDone: (step) => send({ type: 'step_done', ...step }),
+      })
+      send({ type: 'done', answer: result.answer })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      send({ type: 'error', message })
+    } finally {
+      if (!closed) res.end()
+    }
     return
   }
   try {
@@ -1328,6 +1394,13 @@ app.post('/api/chat', async (req, res) => {
     return
   }
 
+  const chatMode = req.body?.mode === 'code_team' ? 'code_team' : 'default'
+  /*
+   * 「自动批准写入」开关：打开后本轮后续 workspace_write 不再逐条挂起等人点。
+   * 高风险文件（.env / 密钥 / CI）后端仍会拦，见 codeTeam.canAutoApprove。
+   */
+  const autoApprove = req.body?.autoApprove === true
+
   // 只保留合法 user/assistant，并截断过长 content，防滥用
   const normalized = messages
     .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
@@ -1347,9 +1420,11 @@ app.post('/api/chat', async (req, res) => {
   res.flushHeaders?.()
 
   let closed = false
+  const abort = new AbortController()
   // 注意：不要用 req.on('close') —— POST body 读完就可能触发，会误停 SSE
   res.on('close', () => {
     closed = true
+    abort.abort()
   })
 
   /** 写一条 SSE：data: {...}\n\n */
@@ -1359,14 +1434,45 @@ app.post('/api/chat', async (req, res) => {
   }
 
   try {
-    // 把 send 交给 Agent：它负责推 meta / text / tool / done
-    await runAgentChat({ messages: normalized, send })
+    if (chatMode === 'code_team') {
+      await runCodeTeamChat({
+        messages: normalized,
+        send,
+        signal: abort.signal,
+        autoApprove,
+      })
+    } else {
+      await runAgentChat({ messages: normalized, send })
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     send({ type: 'error', message })
     send({ type: 'done' })
   } finally {
     if (!closed) res.end()
+  }
+})
+
+/**
+ * 批准或拒绝代码团队挂起的 workspace_write（热重载后仍可按磁盘记录落盘）
+ * body.all = true 表示「全部批准」：这一条放行的同时，本轮后续低/中风险写入也不再逐条问。
+ */
+app.post('/api/chat/approve', async (req, res) => {
+  const id = typeof req.body?.id === 'string' ? req.body.id : ''
+  const decision = req.body?.decision === 'deny' ? 'deny' : req.body?.decision === 'approve' ? 'approve' : ''
+  if (!id || !decision) {
+    res.status(400).json({ error: '需要 id 和 decision（approve / deny）' })
+    return
+  }
+  try {
+    const settled = await settleApproval(id, decision, { all: req.body?.all === true })
+    if (!settled.ok) {
+      res.status(404).json({ error: settled.error })
+      return
+    }
+    res.json(settled)
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
   }
 })
 

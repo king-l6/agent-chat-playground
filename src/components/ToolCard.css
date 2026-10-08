@@ -18,6 +18,11 @@
   background: #fef2f2;
 }
 
+.tool-card--awaiting_approval {
+  border-left-color: #d97706;
+  background: #fff7ed;
+}
+
 .tool-card--done {
   border-left-color: #10b981;
 }
@@ -40,8 +45,76 @@
   display: flex;
   justify-content: space-between;
   gap: 0.75rem;
-  margin-bottom: 0.45rem;
   font-weight: 600;
+}
+
+.tool-card__sum {
+  margin-top: 0.35rem;
+}
+
+.tool-card__line {
+  margin: 0.35rem 0 0;
+  color: #1e293b;
+  line-height: 1.45;
+}
+
+.tool-card__line--sub {
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.tool-hits {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.tool-hits li {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+}
+
+.tool-hits__n {
+  flex: none;
+  min-width: 1.1rem;
+  font-variant-numeric: tabular-nums;
+  color: #1d4ed8;
+  font-weight: 700;
+}
+
+.tool-hits__body {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.tool-hits__title {
+  color: #0f172a;
+}
+
+.tool-hits__meta {
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-hits__unused .tool-hits__title,
+.tool-hits__unused .tool-hits__n {
+  color: #94a3b8;
+}
+
+.tool-card__raw {
+  margin-top: 0.45rem;
+}
+
+.tool-card__raw summary {
+  cursor: pointer;
+  color: #64748b;
+  font-size: 0.78rem;
 }
 
 .tool-card__name {
@@ -72,5 +145,90 @@
 
 .tool-card__error {
   margin-top: 0.4rem;
+  color: #b91c1c;
+}
+
+.tool-card__preview {
+  margin: 0.45rem 0 0;
+  padding: 0.5rem 0.6rem;
+  max-height: 140px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+}
+
+.tool-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+}
+
+.tool-card__ok,
+.tool-card__all,
+.tool-card__no {
+  border: 0;
+  border-radius: 8px;
+  padding: 0.28rem 0.7rem;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.tool-card__ok {
+  background: #166534;
+  color: #fff;
+}
+
+/* 「批准全部」是批量入口，样式压得比单条批准轻一点，避免误当默认操作点 */
+.tool-card__all {
+  background: #dcfce7;
+  color: #166534;
+  box-shadow: inset 0 0 0 1px #86efac;
+}
+
+.tool-card__no {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.tool-card__ok:disabled,
+.tool-card__all:disabled,
+.tool-card__no:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.tool-card__note {
+  margin: 0.4rem 0 0;
+  font-size: 0.75rem;
+  color: #9a3412;
+}
+
+.tool-card__risk {
+  margin: 0.4rem 0 0;
+  font-size: 0.78rem;
+  font-weight: 650;
+  padding: 0.28rem 0.5rem;
+  border-radius: 8px;
+}
+
+.tool-card__risk--low {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.tool-card__risk--medium {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.tool-card__risk--high {
+  background: #fef2f2;
   color: #b91c1c;
 }
