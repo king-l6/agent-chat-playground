@@ -156,6 +156,16 @@
   border-radius: 8px;
 }
 
+.preview__blank p {
+  margin: 0;
+}
+
+.preview__hint {
+  margin-top: 0.4rem !important;
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+
 .preview__logs summary {
   cursor: pointer;
   font-size: 0.76rem;

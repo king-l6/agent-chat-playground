@@ -279,6 +279,34 @@ export async function setWorkspace(root: string) {
   }
 }
 
+/**
+ * 服务端预置的可用仓库列表（PLAYGROUND_WORKSPACE_ALLOWLIST）。
+ *
+ * 服务器形态下没有系统目录选择器（/api/workspace/pick 返回 501），
+ * 从这里选是把「任意绝对路径」收窄成「管理员点过名的目录」的代价，也是收益：
+ * 工作区根会被 bind mount 进沙箱容器，放任前端传任意路径等于把宿主机文件读出去。
+ */
+export type AllowedRepo = { name: string; path: string }
+export type AllowedRoot = { root: string; name: string; isRepo: boolean; repos: AllowedRepo[] }
+
+export async function fetchAllowedWorkspaces(): Promise<{
+  allowed: AllowedRoot[]
+  allowlistEnabled: boolean
+}> {
+  const { data } = await axios.get<{ allowed: AllowedRoot[]; allowlistEnabled: boolean }>(
+    `${API_BASE}/api/workspace/allowed`,
+  )
+  return data
+}
+
+/**
+ * 这个报错是不是「服务端不提供系统选择器」。
+ * 501 = 服务端不在 macOS 上；拿来决定「回落到列表选」还是「直接报错」。
+ */
+export function isPickUnsupported(err: unknown): boolean {
+  return axios.isAxiosError(err) && err.response?.status === 501
+}
+
 export function notifyWorkspaceChanged(root: string | null) {
   window.dispatchEvent(new CustomEvent('workspace-changed', { detail: root }))
 }

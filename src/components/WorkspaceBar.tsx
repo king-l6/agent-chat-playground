@@ -8,10 +8,12 @@
 import { useEffect, useState } from 'react'
 import {
   fetchWorkspaceInfo,
+  isPickUnsupported,
   notifyWorkspaceChanged,
   pickWorkspaceNative,
   setWorkspace,
 } from '../api/chat'
+import { RepoPicker } from './RepoPicker'
 
 function folderName(root: string) {
   const parts = root.replace(/[\\/]+$/, '').split(/[\\/]/)
@@ -24,6 +26,7 @@ export function WorkspaceBar() {
   const [here, setHere] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [picking, setPicking] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -79,7 +82,9 @@ export function WorkspaceBar() {
       const dir = await pickWorkspaceNative('选择工作区')
       if (dir) await bind(dir)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      // 服务端不在 macOS 上（＝正经部署的 Linux 服务器）→ 没有系统弹窗，改从预置列表选
+      if (isPickUnsupported(err)) setPicking(true)
+      else setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
@@ -99,6 +104,14 @@ export function WorkspaceBar() {
 
   return (
     <div className={root ? 'wsbar wsbar--on' : 'wsbar'} role="status">
+      <RepoPicker
+        open={picking}
+        title="选择工作区"
+        onClose={() => setPicking(false)}
+        onPick={(dir) => {
+          void bind(dir).catch((err) => setError(err instanceof Error ? err.message : String(err)))
+        }}
+      />
       <div className="wsbar__text">
         <span className="wsbar__label">工作区</span>
         {root ? (

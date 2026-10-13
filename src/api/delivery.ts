@@ -208,8 +208,11 @@ export async function streamDeliveryTurn(options: {
   id?: string
   onEvent: (event: SseEvent) => void
 }) {
+  // 这是全项目唯一一处裸 fetch（其余走 axios，凭证已在 installUserHeader 里设过）。
+  // 少了 credentials 就是「登录页能过、这一条 SSE 直接 401」——交付页整个哑掉。
   const res = await fetch(`${API_BASE}/api/delivery/turn`, {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify({ actor: options.actor, message: options.message, id: options.id }),
   })

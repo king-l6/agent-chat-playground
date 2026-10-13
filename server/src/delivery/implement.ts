@@ -25,7 +25,18 @@ const ANCHORS = ['src/App.tsx', 'server/src/index.ts']
 const MAX_TREE = 50
 const MAX_READ = 6
 const MAX_CHARS = 6_000
-const MAX_WRITE = 8
+/*
+ * 单轮最多落盘几个文件。
+ *
+ * 原值 8 和 PATCH_SYSTEM 自相矛盾：提示词要求从零建前端时必须产出 package.json /
+ * index.html / vite.config.ts / tsconfig.json / src/main.tsx 这 5 个工程文件，再加上业务
+ * 代码（页面 / 路由 / 服务 / 样式）轻松过 10。实测踩到：模型给了 11 个文件块，第 9 个起
+ * 被 slice 掉，被丢的恰是排在**后面**的 package.json 和 tsconfig.json —— 表现是产物
+ * 「装不了依赖、起不了 dev server」，而模型本身是照提示词写全了的。
+ *
+ * 提到 24：容得下一个从零建的小工程，又不至于让模型失控时写满整棵目录。
+ */
+const MAX_WRITE = 24
 const MAX_ROUNDS = 3
 
 export function assertWritablePath(rel: string) {
@@ -141,7 +152,7 @@ function cleanPath(raw: string) {
   return raw.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^[`'"]+|[`'"]+$/g, '').trim()
 }
 
-function parseHunks(raw: string): Hunk[] {
+function parseHunks(raw: string): { hunks: Hunk[]; dropped: string[] } {
   const text = normNl(raw)
   const hunks: Hunk[] = []
 
@@ -167,7 +178,9 @@ function parseHunks(raw: string): Hunk[] {
     hunks.push({ path, full: content })
   }
 
-  return hunks.slice(0, MAX_WRITE)
+  // 超上限的**不能静默丢**：调用方要把它当成一条错误报出去，repair 轮才会去补写。
+  // 这里只负责如实报告「哪些被切掉了」，怎么处理由调用方决定。
+  return { hunks: hunks.slice(0, MAX_WRITE), dropped: hunks.slice(MAX_WRITE).map((h) => h.path) }
 }
 
 function applyHunks(hunks: Hunk[]) {
@@ -244,6 +257,10 @@ FILE 相对路径
 - 必须做出能用的功能：页面、路由、接口、前端入口都要写。禁止只加菜单/hash 交差。
 - 空目录也要从零新建。SEARCH 留空，REPLACE 写全文。
 - 新建前端项目时，除业务代码外必须同时产出可直接启动的工程文件：package.json、index.html、vite.config.ts、tsconfig.json，以及入口 src/main.tsx。入口里 import 的必须是本次真实创建的文件。缺任何一项都算没做完。
+- 含 JSX 的文件必须用 .tsx，.ts 里不许出现 JSX。同一个模块不要同时留 .ts 和 .tsx 两份——引用写的是省扩展名的，解析到哪一份你根本看不见。
+- import 的第三方包必须同时写进 package.json；import 的相对路径必须是本轮真的创建或已经存在的文件，缺哪个 css 就把它建出来。
+- package.json 要能被 vite 直接启动："type": "module"、scripts.dev 为 "vite"、dependencies 里有 react 与 react-dom、devDependencies 里有 vite 与 @vitejs/plugin-react。react 用 ^18.3.1——入口用的是 react-dom/client，React 17 跑不起来。
+- 路由只包一层 Router：App 或入口里包过就别在页面/路由文件里再包。react-router 两代 API 不要混用（v5 的 Switch/useHistory 与 v6 的 Routes/useNavigate 二选一）。
 - 没有的文件就新建。缺的目录不用先建，直接写 dir/file.ts。
 - SEARCH 从下面原文抄。对不上就 SEARCH 留空、REPLACE 写该文件全文。
 - 不要加评测题，不要只改 eval-cases.ts。
@@ -337,23 +354,34 @@ export async function implementPrd(
     trace?.done(llmId, round === 1 ? 'write_patch' : 'repair', raw ? `补丁 ${raw.length} 字` : '模型没吐字')
     messages.push({ role: 'assistant', content: raw || '(空)' })
 
-    const hunks = parseHunks(raw)
+    const { hunks, dropped } = parseHunks(raw)
+    // 被上限切掉的文件当成「没写上」报出去。**必须是 errors 而不是警告**：
+    // 下面靠 errors 是否为空决定要不要再跑一轮 repair，静默截断会让它直接 break，
+    // 模型连补写被丢文件的机会都没有 —— 这正是「产物缺 package.json」的成因。
+    const overflow = dropped.length
+      ? [
+          `这轮补丁有 ${dropped.length} 个文件超出单轮上限（${MAX_WRITE}）没写：${dropped.join(' ')}`,
+        ]
+      : []
     if (hunks.length === 0) {
       errors = [
         raw
           ? `模型回了字但没有可用补丁：${raw.slice(0, 160)}`
           : '模型这轮是空的。到配置页确认 LIVE 通，或再说具体一点。',
+        ...overflow,
       ]
     } else {
       const one = applyTraced(hunks, trace, `r${round}`)
       written.push(...one.written)
-      errors = one.errors
+      errors = [...one.errors, ...overflow]
     }
 
     if (errors.length === 0) break
     if (round === MAX_ROUNDS) break
 
-    const failed = mentionedPaths(...errors)
+    // dropped 显式并进来：mentionedPaths 那条正则要求路径前面是空白或引号，
+    // 中文标点（「、」「：」）分隔时提不出来 —— 而被切掉的恰恰是最该重读、最该补写的。
+    const failed = Array.from(new Set([...mentionedPaths(...errors), ...dropped]))
     const reread = (failed.length ? failed : unique).slice(0, MAX_READ).map((path) => readBlob(path, 10_000))
     messages.push({
       role: 'user',

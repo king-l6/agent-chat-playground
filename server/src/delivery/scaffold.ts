@@ -24,6 +24,8 @@ export type ScaffoldOutcome = {
   written: string[]
   /** 动手之前缺哪些工程文件（工作区相对） */
   missingBefore: string[]
+  /** 本来存在、但内容不合格被模板重写的（工作区相对） */
+  corrected: string[]
   /** 代码 import 了、但模板给不出版本的裸包名 */
   unknownImports: string[]
   /** 人话提示，给 UI 与评审看 */
@@ -59,6 +61,7 @@ export function ensureProjectScaffold(
     detected: false,
     written: [],
     missingBefore: [],
+    corrected: [],
     unknownImports: [],
     notes: [],
   }
@@ -67,7 +70,30 @@ export function ensureProjectScaffold(
   // JSX 是「这是个要跑起来的前端项目」的强信号；纯脚本/文档项目不碰
   if (!seeds.some((f) => /\.(tsx|jsx)$/.test(f))) return out
 
-  const root = inferProductRoot(seeds)
+  /**
+   * 工程根不能只按目录名猜。`inferProductRoot` 只看路径：Next 的 `app/page.tsx`
+   * 会让它认 `app` 是工程根，于是往别人的 Next 仓库里塞一整套 Vite 工程文件（实测过）。
+   * 先往上找**真的有 package.json** 的那一层——找到就说明这是已有工程，按它来。
+   */
+  const existsAt = (dir: string, rel: string) => {
+    try {
+      return fs.existsSync(resolveUnderRoot(dir === '.' ? rel : `${dir}/${rel}`))
+    } catch {
+      return false
+    }
+  }
+  const nearestProjectRoot = (from: string) => {
+    let dir = from
+    for (;;) {
+      if (existsAt(dir, 'package.json')) return dir
+      if (dir === '.') return null
+      const up = path.posix.dirname(dir)
+      dir = up === '' ? '.' : up
+    }
+  }
+  const guessed = inferProductRoot(seeds)
+  // 只在这里偏保守。health / artifacts 不改：它们认错根最多是报错一条，这里认错根是**写进别人的仓库**。
+  const root = nearestProjectRoot(guessed) ?? guessed
   /** 工作区相对路径 */
   const at = (rel: string) => (root === '.' ? rel : `${root}/${rel}`)
   /** 工程根相对路径（正文里用） */
@@ -81,13 +107,82 @@ export function ensureProjectScaffold(
     }
   }
   const firstExisting = (candidates: string[]) => candidates.find((c) => exists(c)) ?? null
+  const readText = (rel: string) => {
+    try {
+      return fs.readFileSync(resolveUnderRoot(at(rel)), 'utf8')
+    } catch {
+      return null
+    }
+  }
+  const depsField = (p: Record<string, unknown> | null, field: string) => {
+    const block = p?.[field]
+    return block && typeof block === 'object' ? (block as Record<string, unknown>) : {}
+  }
 
-  if (exists('package.json')) {
-    out.notes.push(`${at('package.json')} 已存在，工程文件不动。`)
+  /*
+   * 判「工程文件对不对」，不是「有没有」。
+   *
+   * 原来这里只看 `exists('package.json')`，在就直接 return。实测踩到：模型自己写了一份
+   * package.json（React 17 / vite 2 / 只有 start 脚本、没有 dev），把上一轮刚补好的那套
+   * 反向覆盖；而这里因为「文件在」，再也不管——此后每一轮都看起来一切正常，
+   * 只有预览是白的。所以模板负责的那几个文件要逐项验，坏了就按模板重写。
+   */
+  const broken: Record<string, string[]> = {
+    'package.json': [],
+    'index.html': [],
+    'vite.config.ts': [],
+    'tsconfig.json': [],
+    'tsconfig.node.json': [],
+  }
+
+  const pkgRaw = readText('package.json')
+  let pkg: Record<string, unknown> | null = null
+  if (pkgRaw === null) {
+    broken['package.json'].push('缺文件')
+  } else {
+    try {
+      pkg = JSON.parse(pkgRaw) as Record<string, unknown>
+    } catch {
+      broken['package.json'].push('JSON 解析不了')
+    }
+  }
+  const scripts = (pkg?.scripts && typeof pkg.scripts === 'object' ? pkg.scripts : {}) as Record<
+    string,
+    unknown
+  >
+  if (pkgRaw !== null && broken['package.json'].length === 0 && !scripts.dev) {
+    broken['package.json'].push('没有 dev 脚本，而预览执行的就是 pnpm run dev')
+  }
+
+  // 只校正「全新」或「本来就是 Vite」的工程。往别人的 Next / CRA / 纯 Node 项目里塞
+  // 一个 vite.config.ts 是往人家仓库扔垃圾——这条界限必须有。
+  const looksVite =
+    pkgRaw === null ||
+    Boolean(depsField(pkg, 'dependencies').vite || depsField(pkg, 'devDependencies').vite) ||
+    /\bvite\b/.test(`${scripts.dev ?? ''} ${scripts.build ?? ''}`)
+  if (!looksVite) {
+    out.notes.push(`${at('package.json')} 已存在且不是 Vite 工程，工程文件不动。`)
     return out
   }
 
   out.detected = true
+
+  const htmlRaw = readText('index.html')
+  if (htmlRaw === null) broken['index.html'].push('缺文件')
+  else if (!/<script/i.test(htmlRaw)) broken['index.html'].push('没有 <script>，页面会一直是白的')
+
+  const hasTsx = seeds.some((f) => /\.tsx$/.test(f))
+  const viteRaw = readText('vite.config.ts')
+  if (viteRaw === null) broken['vite.config.ts'].push('缺文件')
+  else if (hasTsx && !/plugin-react/.test(viteRaw)) {
+    broken['vite.config.ts'].push('没有 @vitejs/plugin-react，.tsx 根本编译不过')
+  }
+
+  const tsRaw = readText('tsconfig.json')
+  if (tsRaw === null) broken['tsconfig.json'].push('缺文件')
+  else if (!parsesJson(tsRaw)) broken['tsconfig.json'].push('JSON 解析不了')
+
+  if (readText('tsconfig.node.json') === null) broken['tsconfig.node.json'].push('缺文件')
 
   // 先看清产出里已经有什么，再决定补什么——生成的入口必须引用真实存在的文件
   const entry = firstExisting(['src/main.tsx', 'src/main.jsx', 'src/index.tsx', 'src/index.jsx', 'src/main.ts'])
@@ -95,17 +190,23 @@ export function ensureProjectScaffold(
     firstExisting(['src/App.tsx', 'src/App.jsx', 'src/App.ts']) ?? firstExisting(['App.tsx', 'App.jsx'])
   const css = firstExisting(['src/index.css', 'index.css'])
 
-  const want = [
-    'package.json',
-    'index.html',
-    'vite.config.ts',
-    'tsconfig.json',
-    'tsconfig.node.json',
-    ...(entry ? [] : ['src/main.tsx']),
-    ...(app ? [] : ['src/App.tsx']),
-  ]
-  out.missingBefore = want.filter((rel) => !exists(rel)).map(at)
-  if (!exists('package.json') && out.missingBefore.length === 0) return out
+  const replace = new Set<string>()
+  for (const [rel, reasons] of Object.entries(broken)) {
+    if (reasons.length === 0) continue
+    replace.add(rel)
+    const target = at(rel)
+    const had = exists(rel)
+    if (had) out.corrected.push(target)
+    else out.missingBefore.push(target)
+    out.notes.push(`${target} ${had ? '不合格' : '缺失'}（${reasons.join('；')}），按模板${had ? '重写' : '补上'}。`)
+  }
+
+  // 入口与 App 只在**全新工程**时补。已有工程的结构可能完全不同（页面放在 pages/ 之类），
+  // 按模板硬塞一个 src/App.tsx 等于污染别人的仓库。
+  const fresh = pkgRaw === null
+  if (fresh && !entry) out.missingBefore.push(at('src/main.tsx'))
+  if (fresh && !app) out.missingBefore.push(at('src/App.tsx'))
+  if (replace.size === 0 && (!fresh || out.missingBefore.length === 0)) return out
 
   const sources = seeds
     .filter((f) => /\.(tsx|ts|jsx|js)$/.test(f))
@@ -122,15 +223,27 @@ export function ensureProjectScaffold(
 
   const written: string[] = []
   const write = (rel: string, content: string) => {
-    if (exists(rel)) return
+    // 只有上面验出「不合格」的模板文件才允许覆盖已存在的东西，其余一律不碰
+    if (exists(rel) && !replace.has(rel)) return
     const target = at(rel)
     workspaceWrite(target, content)
-    written.push(target)
+    if (!written.includes(target)) written.push(target)
     onWrite?.(target, content)
   }
 
   const depsJson: Record<string, string> = { react: DEPS.react, 'react-dom': DEPS['react-dom'] }
   for (const name of deps) depsJson[name] = DEPS[name]
+  // 模型自己声明过、模板不认识的包要留着（比如某个 UI 库），否则会把它需要的依赖抹掉。
+  // 模板认识的（react / vite / axios…）一律用模板版本——实测模型写过 react 17 配
+  // react-dom/client 的 18 API，装出来就是白屏，光看依赖名根本发现不了。
+  const modelDeps = {
+    ...depsField(pkg, 'dependencies'),
+    ...depsField(pkg, 'devDependencies'),
+  }
+  for (const [dep, range] of Object.entries(modelDeps)) {
+    if (dep in DEPS || dep in DEV_DEPS) continue
+    if (typeof range === 'string') depsJson[dep] = range
+  }
   // 路由库的版本得跟着代码用的 API 走：装错版本是白屏，不是类型报错
   const routerKey = ['react-router-dom', 'react-router'].find((k) => k in depsJson)
   if (routerKey) {
@@ -235,7 +348,7 @@ export default defineConfig({
     )}\n`,
   )
 
-  if (!app) {
+  if (fresh && !app) {
     out.notes.push('产出里没找到 App 组件，补了一个最小占位，页面内容还得接着改。')
     write(
       'src/App.tsx',
@@ -246,7 +359,7 @@ export default defineConfig({
     )
   }
 
-  if (!entry) {
+  if (fresh && !entry) {
     // 入口引用谁，以探测结果为准；探测不到就用上面补的占位 App
     const appRef = importPath(at('src/main.tsx'), app ?? at('src/App.tsx'))
     const cssRef = css ? `\nimport '${importPath(at('src/main.tsx'), css)}'` : ''
@@ -264,7 +377,7 @@ createRoot(document.getElementById('root') as HTMLElement).render(
 )
 `,
     )
-  } else {
+  } else if (entry) {
     out.notes.push(`入口沿用产出里的 ${entry}，没有另写。`)
   }
 
@@ -277,6 +390,15 @@ createRoot(document.getElementById('root') as HTMLElement).render(
 function bareName(spec: string) {
   const parts = spec.split('/')
   return spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
+}
+
+function parsesJson(text: string) {
+  try {
+    JSON.parse(text)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** 从源码里抠出所有裸包 import，分「模板有版本的」和「没见过的」 */

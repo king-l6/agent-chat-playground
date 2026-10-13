@@ -57,7 +57,12 @@ export function gitStatus() {
     if (noRepo(detail)) {
       return {
         cwd: result.cwd,
-        status: '这个目录还不是 git 仓库，或还没有第一次提交。文件已经写下了，看过程里的写入即可。',
+        /*
+         * 别在这里断言「文件已经写下了」：这条在一个文件都没写的空目录上也会返回，
+         * 评审照抄就成了「所有文件都已创建」。只说事实 + 给替代核对方式。
+         */
+        status:
+          '这个目录还不是 git 仓库，或还没有第一次提交，看不到 diff。要核对本轮写了什么，用 workspace_list / workspace_read。',
       }
     }
     throw new Error(detail || `git 退出码 ${result.status}`)
@@ -84,7 +89,7 @@ export function gitDiff(relPath?: string) {
       return {
         cwd: result.cwd,
         path: relPath?.trim() || null,
-        diff: '还没有 HEAD（空目录或尚未提交）。这轮写下的文件在过程列表里。',
+        diff: '还没有 HEAD（空目录或尚未提交），看不到 diff。要核对本轮写了什么，用 workspace_list / workspace_read。',
       }
     }
     throw new Error(detail || `git 退出码 ${result.status}`)

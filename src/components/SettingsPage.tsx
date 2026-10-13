@@ -13,7 +13,8 @@ import {
   saveSettings,
   type McpPublic,
 } from '../api/chat'
-import { getUserId, getUserName, setUserId, setUserName } from '../lib/userProfile'
+import { getUserId, getUserName, serverIdentity, setUserId, setUserName } from '../lib/userProfile'
+import { logoutSession } from '../lib/auth'
 import './SettingsPage.css'
 
 type EnvRow = { key: string; value: string; hasValue: boolean; show: boolean }
@@ -64,6 +65,8 @@ export function SettingsPage(props: {
   const [envUnlocked, setEnvUnlocked] = useState(false)
   const [profileId, setProfileId] = useState(getUserId)
   const [profileName, setProfileName] = useState(getUserName)
+  // 服务端认证出来的归属人；非 null = 令牌模式，档案 ID 不由用户说了算
+  const serverId = serverIdentity()
 
   useEffect(() => {
     fetchSettings()
@@ -232,11 +235,14 @@ export function SettingsPage(props: {
     setHint('')
     try {
       setUserName(profileName)
-      if (profileId.trim() && profileId.trim().toLowerCase() !== getUserId()) {
+      // 令牌模式下身份是服务端给的，setUserId 会直接抛——这里先拦一道，别拿异常当提示
+      if (!serverId && profileId.trim() && profileId.trim().toLowerCase() !== getUserId()) {
         setUserId(profileId)
         setProfileId(getUserId())
+        setHint('档案已保存。切换档案 ID 后请重新打开各配置页拉取对应数据。')
+        return
       }
-      setHint('档案已保存。切换档案 ID 后请重新打开各配置页拉取对应数据。')
+      setHint('已保存。')
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -278,7 +284,9 @@ export function SettingsPage(props: {
               <div>
                 <h2 className="settings__title">通用</h2>
                 <p className="settings__lead">
-                  多用户各用一个档案 ID；Cookie / Key 按档案隔离存放在本机。
+                  {serverId
+                    ? '服务形态：身份由访问令牌决定，Key / Cookie 跟着归属人走，改不了档案 ID。'
+                    : '多用户各用一个档案 ID；Cookie / Key 按档案隔离存放在本机。'}
                 </p>
               </div>
               <div className="settings__stack">
@@ -291,6 +299,8 @@ export function SettingsPage(props: {
                       onChange={(e) => setProfileId(e.target.value)}
                       placeholder="u_xxxx"
                       spellCheck={false}
+                      readOnly={Boolean(serverId)}
+                      title={serverId ? `由令牌确定：${serverId}` : undefined}
                     />
                   </label>
                   <label className="settings__field">
@@ -304,9 +314,23 @@ export function SettingsPage(props: {
                   </label>
                 </div>
               </div>
-              <button type="submit" className="settings__save">
-                保存
-              </button>
+              <div className="settings__actions">
+                <button type="submit" className="settings__save">
+                  保存
+                </button>
+                {serverId ? (
+                  <button
+                    type="button"
+                    className="settings__logout"
+                    onClick={() => {
+                      // 先清服务端 cookie 再刷新：只清前端的话下一次请求还是带着旧 cookie
+                      void logoutSession().then(() => window.location.reload())
+                    }}
+                  >
+                    退出登录（{serverId}）
+                  </button>
+                ) : null}
+              </div>
             </form>
           )}
 

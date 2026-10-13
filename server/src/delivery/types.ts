@@ -48,8 +48,8 @@ export type Patch = {
   files: string[]
   status?: string
   diff?: string
-  /** 本轮由脚手架兜底补齐的工程文件（模型自己写全了就没有这个字段） */
-  scaffold?: { written: string[]; missingBefore: string[] }
+  /** 本轮由脚手架兜底补齐 / 校正的工程文件（模型自己写全了就没有这个字段） */
+  scaffold?: { written: string[]; missingBefore: string[]; corrected: string[] }
 }
 export type ReviewComment = { path: string; risk: string; mustFix: boolean }
 export type Review = { comments: ReviewComment[]; riskReason?: string }

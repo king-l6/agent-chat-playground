@@ -1,0 +1,116 @@
+# 内网服务形态：一条 `docker compose up -d` 起完整链路。
+#
+# 变量从同目录的 .env 插值（compose 自己会读，不需要 env_file）。
+# 有五个是必填，缺一个就在 compose 阶段报错——比起来了之后再 401 / 起不来沙箱强：
+#   PLAYGROUND_ACCESS_TOKENS     访问令牌，见下方说明
+#   PLAYGROUND_REPOS_ROOT        宿主上放仓库的目录
+#   PLAYGROUND_SANDBOX_UID/GID   沙箱容器以哪个 uid 干活（= 宿主仓库属主）
+# PLAYGROUND_WORKSPACE_ALLOWLIST 默认等于 PLAYGROUND_REPOS_ROOT，想更细可以单独给。
+#
+# 首次部署三步：
+#   1) 装沙箱镜像（它由宿主 daemon 按名字起，不是 compose 的 service）：
+#        docker build -f docker/sandbox.Dockerfile -t playground-sandbox:latest .
+#   2) 生成令牌并写进 .env：
+#        echo "PLAYGROUND_ACCESS_TOKENS=alice:$(openssl rand -hex 24)" >> .env
+#   3) docker compose build && docker compose up -d
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agent-chat-playground:latest
+    restart: unless-stopped
+
+    ports:
+      # 默认只绑回环：本机验证时不会莫名其妙对内网敞着。
+      # 上服务器时在 .env 里设 PLAYGROUND_BIND_IP=0.0.0.0（或具体内网网卡地址）。
+      - '${PLAYGROUND_BIND_IP:-127.0.0.1}:8790:8790'
+
+    environment:
+      # 容器里必须监听 0.0.0.0，否则端口映射进来的请求一个都到不了。
+      # 这条不会造成「裸奔」：index.ts 的启动保险会在「非回环 + 没配令牌」时直接拒绝启动。
+      PLAYGROUND_LISTEN_HOST: '0.0.0.0'
+      PLAYGROUND_PORT: '8790'
+
+      PLAYGROUND_ACCESS_TOKENS: '${PLAYGROUND_ACCESS_TOKENS:?把访问令牌写进 .env：PLAYGROUND_ACCESS_TOKENS=名字:令牌}'
+
+      # 交付泳道的命令执行走容器，而不是宿主（也就是 app 容器自己）
+      PLAYGROUND_SANDBOX: 'docker'
+      PLAYGROUND_SANDBOX_IMAGE: '${PLAYGROUND_SANDBOX_IMAGE:-playground-sandbox:latest}'
+      # 必须是宿主上仓库属主的 uid:gid。查法：stat -c '%u:%g' "$PLAYGROUND_REPOS_ROOT"
+      # 给错的表现是容器写 bind mount 时 EACCES（响的失败，好排查）；
+      # 不给则兜底成 0:0，表现为仓库里凭空多出一堆 root 属主的文件（哑的失败，很难查）。
+      PLAYGROUND_SANDBOX_UID: '${PLAYGROUND_SANDBOX_UID:-1000}'
+      PLAYGROUND_SANDBOX_GID: '${PLAYGROUND_SANDBOX_GID:-1000}'
+
+      # 白名单是「能拿哪个目录当工作区」的唯一开关，必须配（见 workspace.ts assertAllowedRoot）。
+      # 默认等于 REPOS_ROOT；想只放行其中几个子目录，就单独给一个冒号分隔的列表。
+      PLAYGROUND_WORKSPACE_ALLOWLIST: '${PLAYGROUND_WORKSPACE_ALLOWLIST:-${PLAYGROUND_REPOS_ROOT:?在 .env 里指定宿主上放仓库的目录，例如 PLAYGROUND_REPOS_ROOT=/srv/repos}}'
+
+      PLAYGROUND_CORS_ORIGIN: '${PLAYGROUND_CORS_ORIGIN:-}'
+      # 内网是 http，Cookie 加 Secure 会被浏览器直接丢掉。只有套了 https 才设成 1。
+      PLAYGROUND_COOKIE_SECURE: '${PLAYGROUND_COOKIE_SECURE:-0}'
+      # 前面挂了 nginx（deploy/nginx.conf）才开：开了才认 X-Forwarded-For 取真实 IP。
+      # 直连时绝不能开，否则登录限流的「每 IP」变成「每伪造头」，等于没有限流。
+      PLAYGROUND_TRUST_PROXY: '${PLAYGROUND_TRUST_PROXY:-0}'
+      PLAYGROUND_EVAL_MIN_RECALL: '${PLAYGROUND_EVAL_MIN_RECALL:-}'
+
+      # 模型走镜像站，别让容器里的首次加载去 huggingface 主站干等
+      HF_ENDPOINT: '${HF_ENDPOINT:-https://hf-mirror.com}'
+      NPM_REGISTRY: '${NPM_REGISTRY:-}'
+
+      # LLM 网关。团队共享一份就写这里；各人一把 Key 就在页面「配置」里填（按归属人存）
+      ANTHROPIC_API_KEY: '${ANTHROPIC_API_KEY:-}'
+      ANTHROPIC_BASE_URL: '${ANTHROPIC_BASE_URL:-}'
+      ANTHROPIC_DEFAULT_OPUS_MODEL: '${ANTHROPIC_DEFAULT_OPUS_MODEL:-}'
+      ANTHROPIC_DEFAULT_SONNET_MODEL: '${ANTHROPIC_DEFAULT_SONNET_MODEL:-}'
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: '${ANTHROPIC_DEFAULT_HAIKU_MODEL:-}'
+      OPENAI_API_KEY: '${OPENAI_API_KEY:-}'
+      OPENAI_BASE_URL: '${OPENAI_BASE_URL:-}'
+      OPENAI_MODEL: '${OPENAI_MODEL:-}'
+
+    volumes:
+      # 索引、会话、记忆、模型缓存。丢了要重建（模型 1.3G，得重下）
+      - type: volume
+        source: pg-data
+        target: /app/server/data
+
+      # DooD 路径对齐 —— 全篇最容易做错的一处。
+      #
+      # 沙箱容器由**宿主 daemon** 起，`-v <路径>:/work` 里的 <路径> 由 daemon 在**宿主**上解析。
+      # 如果仓库在宿主是 /srv/repos/x、在 app 容器里却是 /repos/x，这一挂会**静默挂上一个空目录**
+      # （daemon 发现路径不存在就自动建），命令「成功」跑在空气上——不报错，结果全错。
+      # 所以两边用同一个绝对路径：宿主 ${PLAYGROUND_REPOS_ROOT} → 容器同路径。
+      #
+      # create_host_path: false 是这条的保险栓。默认 true 会在路径写错时**替你建一个空目录**，
+      # 把上面那个静默失败原样搬进 compose：路径打错了还照样起来，跑起来才发现命令在空气上跑。
+      # 关掉之后，路径不存在就直接起不来，报错指向这里。
+      - type: bind
+        source: '${PLAYGROUND_REPOS_ROOT:?在 .env 里指定宿主上放仓库的目录，例如 PLAYGROUND_REPOS_ROOT=/srv/repos}'
+        target: '${PLAYGROUND_REPOS_ROOT:?在 .env 里指定宿主上放仓库的目录，例如 PLAYGROUND_REPOS_ROOT=/srv/repos}'
+        bind:
+          create_host_path: false
+
+      # 没有这个，app 容器没法起兄弟沙箱容器。
+      # 代价说清楚：能读这个 socket ≈ 宿主 root。见 README 风险章节。
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
+
+    healthcheck:
+      # 不带令牌探活：/api/health 在认证白名单里（见 index.ts 的 AUTH_EXEMPT）
+      test:
+        - CMD-SHELL
+        - 'node -e "fetch(\"http://127.0.0.1:8790/api/health\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"'
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+volumes:
+  # 沙箱的 per-repo node_modules 卷（pg-nm-*）是 sandbox/docker.ts 用 docker CLI 直接建的，
+  # 不归 compose 管，所以这里不列。要看有哪些：docker volume ls --filter name=pg-nm-
+  pg-data:

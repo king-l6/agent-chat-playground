@@ -26,14 +26,23 @@ function restore() {
   try {
     const data = JSON.parse(fs.readFileSync(FILE, 'utf8')) as { root?: string }
     if (typeof data.root === 'string' && fs.existsSync(data.root) && fs.statSync(data.root).isDirectory()) {
-      defaultRoot = fs.realpathSync(data.root)
+      const real = fs.realpathSync(data.root)
+      // 用**不抛**的判定，不用 try/catch：catch 分不清「白名单拒绝」和「代码自己炸了」。
+      // 这里踩过一个真的：restore() 在模块顶层跑，比 allowedCache 的 let 声明还早，
+      // 一进 listAllowedRoots 就 TDZ ReferenceError，被 catch 吞掉后打成
+      // 「不在允许列表内」—— 现象是「每次重启工作区就没了」，跟白名单毫无关系。
+      if (isAllowedRoot(real)) {
+        defaultRoot = real
+      } else {
+        // 白名单改过、这个目录不再允许 → 当作没选过。
+        // 不能让上次写下的值绕过白名单，否则改白名单等于没改。
+        console.warn(`[workspace] 上次的工作区不在允许列表内，忽略：${real}`)
+      }
     }
   } catch {
     /* 还没选过 */
   }
 }
-
-restore()
 
 export function getWorkspaceRoot() {
   return currentRoot()
@@ -45,6 +54,7 @@ export function withWorkspaceRoot<T>(absRoot: string, fn: () => T): T {
   if (!fs.statSync(real).isDirectory()) {
     throw new Error('需求绑定的仓库不是目录')
   }
+  assertAllowedRoot(real)
   return als.run({ root: real }, fn)
 }
 
@@ -53,7 +63,7 @@ export function suggestedHere() {
 }
 
 export function setWorkspaceRoot(next: string) {
-  const real = fs.realpathSync(next)
+  const real = assertAllowedRoot(fs.realpathSync(next))
   if (!fs.statSync(real).isDirectory()) {
     throw new Error('工作区必须是目录')
   }
@@ -66,6 +76,72 @@ export function setWorkspaceRoot(next: string) {
 function isInside(base: string, target: string) {
   const rel = path.relative(base, target)
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
+/**
+ * 允许当工作区的根目录白名单：PLAYGROUND_WORKSPACE_ALLOWLIST（冒号分隔的绝对路径）。
+ *
+ * 为什么必须有：工作区根会被 **bind mount 进沙箱容器**，也会被 workspace_read 直接读。
+ * 不限制的话，持令牌的人只要把工作区指到 /etc 或 ~/.ssh，就能借这两个能力把宿主机的
+ * 任意目录读出来 —— 令牌门禁就整个被绕过了。
+ * 换句话说：容器隔离的是「进程执行」，这份白名单隔离的是「文件访问」，两半都要有。
+ *
+ * 不配 = 不限制，保留本地开发的老行为；**服务器部署必须配**。
+ */
+let allowedCache: string[] | null = null
+
+export function listAllowedRoots(): string[] {
+  if (allowedCache) return allowedCache
+  const raw = process.env.PLAYGROUND_WORKSPACE_ALLOWLIST?.trim()
+  if (!raw) {
+    allowedCache = []
+    return allowedCache
+  }
+  allowedCache = raw
+    .split(':')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      try {
+        return fs.realpathSync(s)
+      } catch {
+        console.warn(`[workspace] 允许列表里的目录不存在，已忽略：${s}`)
+        return ''
+      }
+    })
+    .filter(Boolean)
+  return allowedCache
+}
+
+/**
+ * 校验一个**已 realpath 过**的根是否在白名单内，不在就抛。
+ *
+ * 特意要求传 realpath 后的值：白名单里写 /srv/repos，若有人把它换成指向 /etc 的软链，
+ * 这里比的是 realpath 的结果，绕不过去。
+ */
+/**
+ * 判定版本：不抛异常，只回答「在不在白名单里」。
+ *
+ * 恢复上次工作区（restore）这种**不该因为白名单就中断**的场景用它；
+ * 要「不在就报错拒绝」的场景用下面的 assertAllowedRoot。
+ */
+export function isAllowedRoot(realRoot: string): boolean {
+  const roots = listAllowedRoots()
+  if (roots.length === 0) return true // 没配 = 不限制
+  return roots.some((base) => isInside(base, realRoot))
+}
+
+/**
+ * 校验一个**已 realpath 过**的根是否在白名单内，不在就抛。
+ *
+ * 特意要求传 realpath 后的值：白名单里写 /srv/repos，若有人把它换成指向 /etc 的软链，
+ * 这里比的是 realpath 的结果，绕不过去。
+ */
+export function assertAllowedRoot(realRoot: string): string {
+  if (isAllowedRoot(realRoot)) return realRoot
+  throw new Error(
+    `这个目录不在允许的工作区列表里，不能在它上面干活。可用的根：${listAllowedRoots().join('、')}`,
+  )
 }
 
 /** 把用户给的相对路径钉死在 root 里；绝对路径直接拒绝 */
@@ -109,6 +185,17 @@ export function workspaceList(relPath = '.') {
     path: toRel(dir, entry.name),
   }))
 }
+
+/*
+ * 恢复上次的工作区，**必须放在文件最后**。
+ *
+ * 它经 isAllowedRoot → listAllowedRoots 读到模块级的 `let allowedCache`，
+ * 而那个声明在文件下半部分。模块顶层是按顺序求值的：这行要是写在声明之前，
+ * 访问 allowedCache 就是暂时性死区（TDZ）ReferenceError —— 而且当时被
+ * restore() 里的 catch 吞掉，伪装成「工作区不在允许列表内」，表现为
+ * 「每次重启服务，上次选的仓库就没了」。放最后就没有这个问题。
+ */
+restore()
 
 export function workspaceRead(relPath: string) {
   if (!relPath.trim()) throw new Error('缺少 path')

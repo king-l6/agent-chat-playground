@@ -130,11 +130,21 @@ const SCAN_LIMIT = 5000
 const BINARY_SNIFF = 8192
 
 /**
+ * 宿主自己装依赖留下的锁文件，不进预览。
+ *
+ * `package-lock.json` / `yarn.lock` 是宿主那台机器 npm/yarn 写的，预览里跑的是 pnpm，
+ * 它俩一个字都不认——带进去只会让产物看起来像「用 npm 装的」，纯误导。
+ *
+ * `pnpm-lock.yaml` 反过来要留：pnpm 恰好认它，装起来更快、版本也更可复现。
+ */
+const HOST_LOCKFILES = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock'])
+
+/**
  * 名单之外的还有一类必须挡：**点开头的**。`.env` / `.git` / `.claude` 里是密钥和本机配置，
  * 打包发给浏览器 iframe 就等于把它们交出去，跟 NOISE 是两码事。
  */
 function excluded(name: string) {
-  return NOISE.has(name) || name.startsWith('.')
+  return NOISE.has(name) || HOST_LOCKFILES.has(name) || name.startsWith('.')
 }
 
 /**

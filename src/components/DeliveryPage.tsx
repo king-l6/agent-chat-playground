@@ -16,7 +16,8 @@ import {
   type Seat,
   type TalkTrace,
 } from '../api/delivery'
-import { pickWorkspaceNative } from '../api/chat'
+import { isPickUnsupported, pickWorkspaceNative } from '../api/chat'
+import { RepoPicker } from './RepoPicker'
 import type { ToolCallView } from '../types'
 import { UnifiedDiff } from './CodeDiff'
 import DeliveryPreview from './DeliveryPreview'
@@ -257,6 +258,7 @@ export function DeliveryPage() {
   const [waitSec, setWaitSec] = useState(0)
   const [timeline, setTimeline] = useState<TimelineItem[] | null>(null)
   const [stickyDiff, setStickyDiff] = useState('')
+  const [pickingRepo, setPickingRepo] = useState(false)
   /** 每回合「产物写完了」加一，预览面板拿它当启动信号；0 = 还没跑过，不显示 */
   const [previewKey, setPreviewKey] = useState(0)
   const [gateNote, setGateNote] = useState<{ gate: string; message: string } | null>(null)
@@ -361,6 +363,18 @@ export function DeliveryPage() {
       // 用它给单条需求绑仓库会把全局也带跑偏。
       const dir = await pickWorkspaceNative('给这条需求选一个仓库')
       if (dir) setRun(await bindDeliveryWorkspace(run.id, dir))
+    } catch (err) {
+      // 服务器（非 macOS）没有系统弹窗，回落成从预置列表选
+      if (isPickUnsupported(err)) setPickingRepo(true)
+      else setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  async function bindRepoFromList(dir: string) {
+    if (!run) return
+    setError('')
+    try {
+      setRun(await bindDeliveryWorkspace(run.id, dir))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -886,6 +900,12 @@ export function DeliveryPage() {
         {talkPane}
         {documentPane}
       </div>
+      <RepoPicker
+        open={pickingRepo}
+        title="给这条需求选一个仓库"
+        onClose={() => setPickingRepo(false)}
+        onPick={(dir) => void bindRepoFromList(dir)}
+      />
     </div>
   )
 }

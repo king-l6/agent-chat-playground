@@ -37,6 +37,15 @@ const PHASE_TEXT: Record<PreviewPhase, string> = {
 const RESTART_FILES = ['vite.config.ts', 'vite.config.js', 'vite.config.mts', 'index.html']
 const LOG_KEEP = 20_000
 
+/**
+ * boot 阶段一行日志都没有（日志要等 `pnpm run dev` 才产出），界面看起来就是死的。
+ * 带上秒数，至少让人知道它在动，以及快到 45 秒的超时了。
+ */
+function phaseLabel(phase: PreviewPhase, waited: number) {
+  if (phase !== 'booting' || waited <= 0) return PHASE_TEXT[phase]
+  return `${PHASE_TEXT[phase]} ${waited}s`
+}
+
 /** 列表里工程文件和入口排前面，源码次之，其余垫后 */
 function rank(path: string) {
   if (/^(package\.json|index\.html|vite\.config\.|tsconfig)/.test(path)) return 0
@@ -55,6 +64,8 @@ export default function DeliveryPreview({ runId, trigger }: { runId: string; tri
   const [open, setOpen] = useState(true)
   /** 手动重试计数。只有环境类失败（网络等）值得重试，它进 effect 依赖触发整条流程重跑 */
   const [attempt, setAttempt] = useState(0)
+  /** boot 已经等了多久（秒）。这个阶段没有日志，只能靠它证明没死 */
+  const [waited, setWaited] = useState(0)
 
   const wcRef = useRef<WebContainer | null>(null)
   const mountedRef = useRef(false)
@@ -78,6 +89,17 @@ export default function DeliveryPreview({ runId, trigger }: { runId: string; tri
     const pane = logPane.current
     if (pane) pane.scrollTop = pane.scrollHeight
   }, [logs, open])
+
+  // 只给 boot 计时：其余阶段有日志滚动，不用再画一个秒表
+  useEffect(() => {
+    if (phase !== 'booting') {
+      setWaited(0)
+      return
+    }
+    const t0 = Date.now()
+    const timer = setInterval(() => setWaited(Math.round((Date.now() - t0) / 1000)), 1000)
+    return () => clearInterval(timer)
+  }, [phase])
 
   useEffect(() => {
     if (!trigger) return
@@ -139,7 +161,7 @@ export default function DeliveryPreview({ runId, trigger }: { runId: string; tri
 
         if (needInstall) {
           setPhase('installing')
-          append(`\n$ npm install\n`)
+          append(`\n$ pnpm install\n`)
           await installDeps(wc, append)
           if (cancelled) return
         }
@@ -147,7 +169,7 @@ export default function DeliveryPreview({ runId, trigger }: { runId: string; tri
           devRef.current?.dispose()
           devRef.current = null
           setPhase('starting')
-          append(`\n$ npm run dev\n`)
+          append(`\n$ pnpm run dev\n`)
           const handle = await runDev(wc, append)
           if (cancelled) {
             handle.dispose()
@@ -182,7 +204,7 @@ export default function DeliveryPreview({ runId, trigger }: { runId: string; tri
           {open ? '收起' : '展开'}
         </button>
         <strong>生成的产物</strong>
-        <span className={`preview__phase preview__phase--${phase}`}>{PHASE_TEXT[phase]}</span>
+        <span className={`preview__phase preview__phase--${phase}`}>{phaseLabel(phase, waited)}</span>
         {bundle ? (
           <span className="preview__meta">
             {bundle.root === '.' ? '仓库根' : bundle.root}/ · {bundle.files.length} 个文件
@@ -232,9 +254,16 @@ export default function DeliveryPreview({ runId, trigger }: { runId: string; tri
               {error.detail ? <pre>{error.detail}</pre> : null}
               {/* 产物缺件和沙箱起不来，重试都是白试；只有环境类失败值得再按一次 */}
               {error.kind !== 'incomplete' && error.kind !== 'isolation' ? (
-                <button type="button" onClick={() => setAttempt((n) => n + 1)}>
-                  重试
-                </button>
+                error.recover === 'reload' ? (
+                  // 沙箱在这个 document 里已经报废，组件内部重跑多少次都是同一个死 Promise
+                  <button type="button" onClick={() => window.location.reload()}>
+                    刷新页面重来
+                  </button>
+                ) : (
+                  <button type="button" onClick={() => setAttempt((n) => n + 1)}>
+                    重试
+                  </button>
+                )
               ) : null}
             </div>
           ) : null}
@@ -245,11 +274,16 @@ export default function DeliveryPreview({ runId, trigger }: { runId: string; tri
                 <iframe className="preview__frame" src={url} title="产物预览" />
               ) : (
                 <div className="preview__blank">
-                  {error
-                    ? error.kind === 'incomplete'
-                      ? '没东西可跑：先让研发把工程文件补齐。'
-                      : '预览没起来，看下面的日志。'
-                    : PHASE_TEXT[phase]}
+                  <p>
+                    {error
+                      ? error.kind === 'incomplete'
+                        ? '没东西可跑：先让研发把工程文件补齐。'
+                        : '预览没起来，看下面的日志。'
+                      : phaseLabel(phase, waited)}
+                  </p>
+                  {!error && phase === 'booting' && waited >= 5 ? (
+                    <p className="preview__hint">首次要拉十几 MB 的运行时，一般 10~20 秒；超过 45 秒会报错。</p>
+                  ) : null}
                 </div>
               )}
               <details className="preview__logs" open={phase === 'error' || phase === 'installing'}>

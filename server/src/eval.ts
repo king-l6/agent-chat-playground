@@ -80,6 +80,29 @@ function firstHitRank(
   return 0
 }
 
+/**
+ * 这条黄金题在当前语料下有没有「能答对」的可能。
+ *
+ * 判据是**目标文档整个不在语料里**。这种情况它既不是命中也不是未命中，
+ * 算进分母就是拿一条不可能过的题去压分。
+ *
+ * 实测踩到的：`--core` 模式只加载内置文档 + 手册、不含公司 wiki，
+ * 而黄金集里有 25 条 wiki-* 题 —— 目标文档根本不在，Recall 直接掉到 26%。
+ * 那个数字没有任何信息量，却会让「拿 eval 当门禁」这件事直接不可用。
+ *
+ * 只用 docId 存在与否判，**不用**「正文里有没有 needle」判：
+ * 正文缺 needle 说明黄金题本身写错了（期望串打错、文档改了），
+ * 那是该响亮失败的事，不该被当成「不适用」静默跳过。
+ * 不传 corpus（没有语料可比）时不跳过任何一条。
+ */
+function caseApplicable(
+  c: GoldCase,
+  corpus?: Array<{ docId: string; title: string; text: string }>,
+): boolean {
+  if (!corpus) return true
+  return corpus.some((it) => it.docId === c.docId)
+}
+
 async function scoreCases(
   label: string,
   gold: GoldFile,
@@ -89,8 +112,15 @@ async function scoreCases(
 ) {
   let ok = 0
   let rrSum = 0
+  let scored = 0
   const misses: string[] = []
+  const skipped: string[] = []
   for (const c of gold.cases) {
+    if (!caseApplicable(c, corpus)) {
+      skipped.push(c.id)
+      continue
+    }
+    scored += 1
     const hits = await hitsOf(c)
     const rank = firstHitRank(c, hits, corpus)
     if (rank > 0) {
@@ -105,13 +135,62 @@ async function scoreCases(
       }`,
     )
   }
-  const recall = ok / gold.cases.length
-  const mrr = rrSum / gold.cases.length
+  const recall = scored ? ok / scored : 0
+  const mrr = scored ? rrSum / scored : 0
   console.log(
-    `[eval] ${label} Recall@${topK} = ${ok}/${gold.cases.length} = ${(recall * 100).toFixed(0)}%  MRR@${topK} = ${mrr.toFixed(3)}`,
+    `[eval] ${label} Recall@${topK} = ${ok}/${scored} = ${(recall * 100).toFixed(0)}%  MRR@${topK} = ${mrr.toFixed(3)}`,
   )
+  // 跳过的要打出来。静默缩分母等于把「题跑少了」和「题答对了」混成一个数字。
+  if (skipped.length) {
+    console.log(
+      `[eval] ${label} 跳过 ${skipped.length} 条（目标文档不在当前语料里）：${skipped.slice(0, 8).join('、')}${skipped.length > 8 ? '…' : ''}`,
+    )
+  }
   if (misses.length) console.log(misses.join('\n'))
-  return { ok, total: gold.cases.length, recall, mrr }
+  return { ok, total: scored, recall, mrr, skipped: skipped.length }
+}
+
+/**
+ * CI 门禁：Recall@K 低于阈值就非零退出。
+ *
+ * 为什么要写在 eval 自己里而不是外面加个解析脚本：eval 在此之前**再低也 exit 0**
+ * （末尾只有 main().catch 兜异常），拿它当门禁等于门禁永远绿灯。判定必须和
+ * 打分在同一条代码路径上，否则改了指标口径门禁不会跟着变。
+ *
+ * 不设 PLAYGROUND_EVAL_MIN_RECALL = 不做门禁，本地跑 eval 的行为一个字不变。
+ * 只对最终那条 rerank 结果判定：线上 retrieve() 走的就是 searchRerank
+ * （见 retrieve.ts 的 retrieve → searchRerank），vector/hybrid 是对照组，不是出货口径。
+ * --sweep 也不判：那是切块参数的诊断模式，不跑出货路径。
+ */
+function assertRecallGate(scored: { recall: number; total: number; skipped: number }, topK: number) {
+  const raw = process.env.PLAYGROUND_EVAL_MIN_RECALL?.trim()
+  if (!raw) return
+  const min = Number(raw)
+  if (!Number.isFinite(min) || min <= 0 || min > 1) {
+    console.error(`[eval] PLAYGROUND_EVAL_MIN_RECALL 得是 (0,1] 的小数，收到「${raw}」`)
+    process.exit(2)
+  }
+  const pct = (v: number) => `${(v * 100).toFixed(0)}%`
+  const tail = scored.skipped ? `，跳过 ${scored.skipped} 条` : ''
+  // 一条都没评上时不判定：那不是「得分低」，是「这次根本没量到」。
+  // 报 0% 会让人去查检索，而真正的问题是语料没加载（比如 --core 跑含 wiki 题的题集）。
+  if (scored.total === 0) {
+    console.error(
+      `[eval] 门禁不成立：一条题都没评上（目标文档都不在当前语料里${tail}）。` +
+        `换个语料模式，或确认 server/data/wiki 已经喂进来。`,
+    )
+    process.exit(2)
+  }
+  if (scored.recall + 1e-9 >= min) {
+    console.log(
+      `[eval] 门禁通过：Recall@${topK} ${pct(scored.recall)} ≥ ${pct(min)}（${scored.total} 条${tail}）`,
+    )
+    return
+  }
+  console.error(
+    `[eval] 门禁未过：Recall@${topK} ${pct(scored.recall)} < ${pct(min)}（${scored.total} 条${tail}）`,
+  )
+  process.exit(1)
 }
 
 async function loadItems(coreOnly: boolean, maxChars: number, overlap: number) {
@@ -183,7 +262,7 @@ async function main() {
   const { items } = await loadItems(args.coreOnly, args.maxChars, args.overlap)
   await scoreCases('vector', gold, topK, (c) => searchVectors(c.query, items, topK), items)
   await scoreCases('hybrid', gold, topK, (c) => searchHybrid(c.query, items, topK), items)
-  await scoreCases('rerank', gold, topK, (c) => searchRerank(c.query, items, topK), items)
+  const shipped = await scoreCases('rerank', gold, topK, (c) => searchRerank(c.query, items, topK), items)
 
   const sample = gold.cases.find((c) => c.id.startsWith('wiki-')) ?? gold.cases[0]
   if (sample) {
@@ -196,6 +275,10 @@ async function main() {
       `[eval] small-to-big 例 ${sample.id} top1「${top?.title ?? ''}」命中块 ${matched} 字 → 含邻接 ${ctx} 字`,
     )
   }
+
+  // 门禁放在最后：前面的诊断输出照常打完，失败才体现在退出码上，
+  // 这样 CI 挂了也能从日志看到是「真退步」还是「某条题被改了」。
+  assertRecallGate(shipped, topK)
 }
 
 main().catch((err) => {

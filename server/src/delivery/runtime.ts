@@ -4,8 +4,8 @@
 import fs from 'node:fs'
 import type { SseEvent } from '../types.js'
 import { gitDiff, gitStatus } from '../git.js'
-import { executeTool } from '../tools.js'
-import { getWorkspaceRoot, withWorkspaceRoot } from '../workspace.js'
+import { currentUserId } from '../requestContext.js'
+import { assertAllowedRoot, getWorkspaceRoot, withWorkspaceRoot } from '../workspace.js'
 import { collectArtifacts, diffForFiles } from './artifacts.js'
 import { runAllowedCommand } from './commands.js'
 import { refinePrd } from './draft.js'
@@ -26,7 +26,6 @@ import {
 } from './store.js'
 import {
   GateError,
-  type DeliveryRole,
   type DeliveryRun,
   type GateAction,
   type Prd,
@@ -126,7 +125,13 @@ export function publicRuns() {
 }
 
 export function startNewRun(input?: { workspaceRoot?: string }) {
-  return createRun(input)
+  // 新开一条也带仓库时同样过白名单：不然「建的时候塞坏路径」和「事后改绑」是两个洞，
+  // 只堵一个没有意义。
+  const root = input?.workspaceRoot?.trim()
+  if (!root) return createRun(input)
+  const real = assertAllowedRoot(fs.realpathSync(root))
+  if (!fs.statSync(real).isDirectory()) throw new Error('选的要是个目录')
+  return createRun({ ...input, workspaceRoot: real })
 }
 
 export function activateRun(id: string) {
@@ -137,11 +142,17 @@ export function deleteDeliveryRun(id: string) {
   return storeDeleteRun(id)
 }
 
-/** 绑仓库：校验目录真实存在再落盘 */
+/**
+ * 绑仓库：校验目录真实存在**且在允许列表内**，再落盘。
+ *
+ * 白名单必须在写入这一层拦，不能只靠用的时候拦（withWorkspaceRoot / resolveUnderRoot）：
+ * 只在用时拦，坏路径已经躺在 run 文件里了 —— 本轮会在最外层抛错、每个读接口都带着
+ * 一段错误文本，看起来像「功能坏了」而不是「你选错了」。实测过：绑 /etc 会被存下来。
+ */
 export function bindRunWorkspace(id: string, absRoot: string | undefined) {
   const root = absRoot?.trim()
   if (root) {
-    const real = fs.realpathSync(root)
+    const real = assertAllowedRoot(fs.realpathSync(root))
     if (!fs.statSync(real).isDirectory()) throw new Error('选的要是个目录')
     return storeBindWorkspace(id, real)
   }
@@ -294,19 +305,13 @@ export function applyGate(
 }
 
 
-export function deliveryExecuteTool(role: DeliveryRole, name: string, rawArgs: string) {
-  assertRoleTool(role, name)
-  if (name === 'workspace_write') {
-    const args = JSON.parse(rawArgs || '{}') as { path?: string }
-    assertWritablePath(String(args.path ?? ''))
-  }
-  if (name === 'run_allowed_command') {
-    const args = JSON.parse(rawArgs || '{}') as { command?: string }
-    return JSON.stringify(runAllowedCommand(String(args.command ?? ''), requireWorkspace()))
-  }
-  return executeTool(name, rawArgs)
-}
-
+/*
+ * 这里原来有个 deliveryExecuteTool(role, name, rawArgs)：一套「角色 → 允许的工具名」转发。
+ * 全仓库 grep 无消费者（各 phase 执行体各自调自己的模块：implement.ts 调 implementPrd、
+ * testing 段直接调 runAllowedCommand），留着是个坑 —— 它是唯一一处**不带 ctx**
+ * 调 runAllowedCommand 的地方，容器标签、审计字段都会缺，谁哪天顺手接上去就会踩。
+ * 删掉。assertRoleTool / assertWritablePath 仍然从下面 re-export，没有连带损失。
+ */
 function remember(run: DeliveryRun, user: string, assistant: string, trace?: TalkTrace) {
   run.talk.push({ role: 'user', content: user })
   run.talk.push({ role: 'assistant', content: assistant, ...(trace ? { trace } : {}) })
@@ -412,46 +417,94 @@ async function runTurnBody(run: DeliveryRun, actor: Seat, text: string, send: Se
     send({ type: 'role_start', role: 'dev' })
     const tap = tapTrace(send)
     tap.send({ type: 'text_delta', delta: '开始按文档改仓库。\n' })
-    const done = await implementPrd(
-      run.prd,
-      text,
-      {
-        note: (line) => tap.send({ type: 'text_delta', delta: line }),
-        start: (id, name, args) => tap.send({ type: 'tool_start', id, name, arguments: args }),
-        done: (id, name, result) => tap.send({ type: 'tool_result', id, name, result }),
-        fail: (id, name, error) => tap.send({ type: 'tool_error', id, name, error }),
-      },
-      { talk: run.talk, lastErrors: run.lastErrors ?? [] },
-    )
-    // 工程骨架兜底：模型漏了 package.json 之类，这里补齐。必须在取快照之前，
-    // 补出来的文件才会被 git status 看到、进 files、进 diff、被评审看见。
-    const scaffold = ensureProjectScaffold(done.files, (rel) => {
-      const id = `scaffold-${rel}`
-      tap.send({
-        type: 'tool_start',
-        id,
-        name: 'scaffold_write',
-        arguments: JSON.stringify({ path: rel }),
+    const sink = {
+      note: (line: string) => tap.send({ type: 'text_delta', delta: line }),
+      start: (id: string, name: string, args: string) =>
+        tap.send({ type: 'tool_start', id, name, arguments: args }),
+      done: (id: string, name: string, result: string) =>
+        tap.send({ type: 'tool_result', id, name, result }),
+      fail: (id: string, name: string, error: string) =>
+        tap.send({ type: 'tool_error', id, name, error }),
+    }
+
+    // 这批交付涉及的文件：模型写的 + 脚手架补的/校正的，一路累积到取快照
+    const declared = new Set<string>(run.patch?.files ?? [])
+    const backfilled = { written: [] as string[], missingBefore: [] as string[], corrected: [] as string[] }
+
+    /**
+     * 工程骨架兜底 + 实测完整性。必须在取快照**之前**跑：落盘的改动才会被 git status
+     * 看到、进 files、进 diff、被评审看见。可能被判不合格而重跑一轮，所以要能重复调用。
+     */
+    const settle = () => {
+      const one = ensureProjectScaffold([...declared], (rel) => {
+        const id = `scaffold-${rel}`
+        tap.send({
+          type: 'tool_start',
+          id,
+          name: 'scaffold_write',
+          arguments: JSON.stringify({ path: rel }),
+        })
+        tap.send({ type: 'tool_result', id, name: 'scaffold_write', result: `已写入 ${rel}` })
       })
-      tap.send({ type: 'tool_result', id, name: 'scaffold_write', result: `已补齐 ${rel}` })
+      backfilled.written.push(...one.written)
+      backfilled.missingBefore.push(...one.missingBefore)
+      backfilled.corrected.push(...one.corrected)
+      for (const rel of one.written) declared.add(rel)
+      for (const note of one.notes) tap.send({ type: 'text_delta', delta: `\n${note}\n` })
+      return checkProjectHealth([...declared])
+    }
+
+    let done = await implementPrd(run.prd, text, sink, {
+      talk: run.talk,
+      lastErrors: run.lastErrors ?? [],
     })
-    for (const note of scaffold.notes) tap.send({ type: 'text_delta', delta: `\n${note}\n` })
+    for (const rel of done.files) declared.add(rel)
+    let health = settle()
+
+    /*
+     * 实测不合格就自愈一轮。
+     *
+     * 原来这里只兜底、不复验：产物起不起得来要等人自己去点「运行结果」，再靠人催一句
+     * 才有人管——本次故障就是这么来回三轮的，而每一轮模型都以为自己写完了。
+     * 既然评审那条 mustFix 用的就是同一个 checkProjectHealth，那就在这一轮直接拿它的
+     * 结论再修一次。**只加一轮**：修不动就交给评审拦住，不在这里打转
+     *（每轮都是一次完整的 LLM 调用，16G 机器上也不便宜）。
+     */
+    if (!health.ok) {
+      tap.send({
+        type: 'text_delta',
+        delta: `\n实测这份产物起不来，带着证据再修一轮：\n- ${health.evidence.join('\n- ')}\n`,
+      })
+      done = await implementPrd(
+        run.prd,
+        `${text}\n\n【必须优先修】上一轮产物实测起不来，逐条改掉：\n- ${health.evidence.join('\n- ')}`,
+        sink,
+        { talk: run.talk, lastErrors: health.evidence },
+      )
+      for (const rel of done.files) declared.add(rel)
+      health = settle()
+    }
 
     send({ type: 'meta', mode: done.live ? 'live' : 'mock' })
     const snap = workspaceSnapshot(run)
-    const files = orderForDiff([
-      ...new Set([...(run.patch?.files ?? []), ...done.files, ...scaffold.written]),
-    ])
+    const files = orderForDiff([...declared])
     // 已跟踪的走 git，未跟踪的合成——空目录新建项目时后者才是全部
     const diff = inRunRoot(run, () => diffForFiles(files, snap.status))
-    run.lastErrors = done.errors
+    // 还没修好的问题一并进 lastErrors：下一轮研发开口时就带着实测证据，不用人复述
+    run.lastErrors = [...done.errors, ...(health.ok ? [] : health.evidence)]
     run.patch = {
       summary: text || `按 PRD 改 ${root}`,
       files,
       status: snap.status,
       diff: diff || snap.diff,
-      ...(scaffold.written.length
-        ? { scaffold: { written: scaffold.written, missingBefore: scaffold.missingBefore } }
+      ...(backfilled.written.length
+        ? {
+            scaffold: {
+              written: [...new Set(backfilled.written)],
+              missingBefore: [...new Set(backfilled.missingBefore)],
+              corrected: [...new Set(backfilled.corrected)],
+            },
+          }
         : {}),
     }
     remember(run, text || '按右边文档改选中的仓库', done.reply, tap.snapshot())
@@ -478,6 +531,8 @@ async function runTurnBody(run: DeliveryRun, actor: Seat, text: string, send: Se
     const extra = files.filter((f) => f !== path)
     // 工程完整性：只报实测到的事实，条条能指回文件。mustFix 已有的闸门语义会拦住「放行去测试」。
     const health = checkProjectHealth(run.patch?.files ?? [])
+    // 打回研发时让它带着实测证据走，而不是只丢一句「起不来」——复验用的就是这个结论
+    if (!health.ok) run.lastErrors = health.evidence
     run.review = {
       comments: [
         ...(health.ok
@@ -526,12 +581,19 @@ async function runTurnBody(run: DeliveryRun, actor: Seat, text: string, send: Se
     for (const ac of run.prd.acceptance) {
       if (!ac.checkedByPm) continue
       if (ac.kind === 'auto' && ac.command) {
-        const log = runAllowedCommand(ac.command, cwd)
+        const log = runAllowedCommand(ac.command, cwd, {
+          runId: run.id,
+          phase: 'testing',
+          userId: currentUserId(),
+        })
         commandLogs.push(log)
+        // 报告里写清命令是在哪跑的：容器模式下这是「隔离生效」的凭据，
+        // 比在文档里声称有用。启动失败（exitCode 1 且没输出）会带 launchError。
+        const where = log.sandbox === 'docker' ? '沙箱容器' : '宿主机'
         items.push({
           acId: ac.id,
           result: log.exitCode === 0 ? 'pass' : 'fail',
-          detail: `在 ${cwd} 跑 ${log.command}，exit=${log.exitCode}\n${log.excerpt}`,
+          detail: `在${where}的 ${cwd} 跑 ${log.command}，exit=${log.exitCode}${log.launchError ? '（没能启动）' : ''}\n${log.excerpt}`,
         } as const)
       } else {
         items.push({

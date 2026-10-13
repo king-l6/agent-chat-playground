@@ -175,7 +175,7 @@ export const toolDefinitions: ChatCompletionTool[] = [
     function: {
       name: 'workspace_write',
       description:
-        '向已选工作区写入一个文本文件。path 必须是相对路径。禁止用 .. 或绝对路径写出工作区。',
+        '向已选工作区写入一个文本文件：文件不存在就新建（父目录自动创建，空目录也能直接写），存在就整体覆盖。不需要用户事先手动建文件。path 必须是相对路径。禁止用 .. 或绝对路径写出工作区。',
       parameters: {
         type: 'object',
         properties: {

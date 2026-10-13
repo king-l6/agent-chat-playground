@@ -342,6 +342,33 @@
   cursor: not-allowed;
 }
 
+/* 保存 + 退出登录并排。原来 .settings__save 是 .settings__body 这个 grid 的直接子元素，
+   靠 justify-self 靠左；包一层 flex 后 justify-self 落在 wrapper 上，行为不变。 */
+.settings__actions {
+  justify-self: start;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.settings__logout {
+  appearance: none;
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  color: #6b7280;
+  border-radius: 8px;
+  padding: 0.55rem 0.95rem;
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.settings__logout:hover {
+  border-color: #fca5a5;
+  color: #b91c1c;
+}
+
 .settings__hint {
   margin: 0;
   font-size: 0.8rem;

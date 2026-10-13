@@ -1,0 +1,98 @@
+name: ci
+
+# 只跑「自足、确定」的检查：不依赖本机数据、不依赖模型下载、不依赖网络服务。
+# eval 门禁（PLAYGROUND_EVAL_MIN_RECALL）刻意**不在这里**，原因见文件末尾。
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新 push 顶掉旧的，别让排队的历史提交白跑
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+        env:
+          # 只 lint，不跑 Electron。不跳的话每次 CI 白下 ~100MB 二进制。
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - run: npm run lint
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      # 四个 tsc 工程：前端 app / vite 配置 node / 后端 server / 桌面壳 electron。
+      # 这是整套 CI 里最值钱的一项 —— 它挡的是「改了后端忘了对齐前端类型」这类
+      # 单测覆盖不到、但一上线就炸的问题。
+      - run: npm run typecheck
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # compose 的必填变量用 :? 写的，缺一个就报错。这里喂一组假值，
+      # 校验的是「变量名有没有写错、YAML 能不能解析、必填项是不是都声明了」。
+      # 真值当然不进仓库。
+      - name: 校验 docker-compose.yml
+        env:
+          PLAYGROUND_ACCESS_TOKENS: 'ci:dummy'
+          PLAYGROUND_REPOS_ROOT: '/srv/repos'
+        run: docker compose config --quiet
+
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 两个镜像都构建一遍。构建过不了 = 镜像里 COPY 的路径写错了 / tsconfig 改坏了，
+      # 这类问题只有真 build 才发现（typecheck 不看 Dockerfile）。
+      - name: 构建 app 镜像
+        run: docker build -t agent-chat-playground:ci .
+      - name: 构建沙箱镜像
+        run: docker build -f docker/sandbox.Dockerfile -t playground-sandbox:ci .
+      - name: 冒烟：app 镜像能在无令牌模式下起来
+        run: |
+          # 监听回环 + 不配令牌 = 本地开发形态，启动保险放行。
+          # 起得来就说明 dist-server 编译产物、node_modules、静态目录都在位。
+          cid=$(docker run -d -e PLAYGROUND_LISTEN_HOST=127.0.0.1 -p 8790:8790 agent-chat-playground:ci)
+          for i in $(seq 1 30); do
+            if docker exec "$cid" node -e 'fetch("http://127.0.0.1:8790/api/health").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))' 2>/dev/null; then
+              echo "health ok"; docker rm -f "$cid" >/dev/null; exit 0
+            fi
+            sleep 2
+          done
+          echo "app 镜像起不来，日志："; docker logs "$cid"; docker rm -f "$cid" >/dev/null; exit 1
+
+# 为什么 eval 门禁不在上面：
+#
+# 门禁本身已经实现在 server/src/eval.ts 里（PLAYGROUND_EVAL_MIN_RECALL，不设=不门禁），
+# 实测过：对着完整语料（10413 chunks / 555 篇 wiki）跑，hybrid 与 rerank 都是 Recall@3 = 100%，
+# 阈值 0.8 通过；真退步才会红。
+#
+# 但它**跑不了**：完整语料 = server/data/index.json + server/data/wiki，两者都被 gitignore，
+# 是喂进去的公司文档，不在仓库里。CI 里唯一能自足跑的 --core 模式只有内置文档 + 手册，
+# 黄金题集里 21/35 条的目标文档不在那个语料里，hybrid/rerank 掉到 64% ——
+# 那是夹具规模造成的假象（同一批题在完整语料上是 100%），拿它当门禁等于门禁常红。
+# （跳过不适用的题让这个数字变得可读了，但样本只剩 14 条，仍然不适合当门禁。）
+#
+# 所以它是**发布前的本地/内网门禁**，不是 PR 门禁：
+#     PLAYGROUND_EVAL_MIN_RECALL=0.8 npm run eval:rag
+# 在喂过 wiki 的那台机器上跑，红了就别发。
