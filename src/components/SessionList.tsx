@@ -66,6 +66,8 @@ export function SessionList(props: {
   onNew: () => void
   onSelect: (id: string) => void
   onDelete: (id: string) => void
+  /** 复制分享链接（同时把这条会话设为可分享）；App.tsx 的 onShare */
+  onShare: (id: string) => void
 }) {
   const [query, setQuery] = useState('')
 
@@ -125,8 +127,38 @@ export function SessionList(props: {
                             {busy ? '生成中' : whenLabel(askedAt)}
                           </time>
                         </span>
-                        <span className="sessions__preview">{preview(session)}</span>
+                        <span className="sessions__preview">
+                          {/* 已分享的标记，让归属人一眼看出哪些会话对别人可见 */}
+                          {session.visibility === 'shared' && (
+                            <span className="sessions__shared" title="已可分享：有链接的人能只读打开">
+                              已分享 ·{' '}
+                            </span>
+                          )}
+                          {preview(session)}
+                        </span>
                       </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="sessions__share"
+                      title="复制分享链接（会把这条设为可分享）"
+                      aria-label={`复制 ${session.title || '新对话'} 的分享链接`}
+                      onClick={() => props.onShare(session.id)}
+                    >
+                      <svg
+                        width="12"
+                        height="12"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1" />
+                        <path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" />
+                      </svg>
                     </button>
                     <button
                       type="button"

@@ -95,7 +95,7 @@ export function ChatOutline({
     <aside className="outline" aria-label="提问目录">
       <p className="outline__title">提问目录</p>
       <ol className="outline__list">
-        {items.map((m, index) => (
+        {items.map((m) => (
           <li key={m.id}>
             <button
               type="button"

@@ -1,0 +1,105 @@
+.authgate {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f4f5f7;
+  color: #0f172a;
+  font-family:
+    'Segoe UI',
+    'PingFang SC',
+    'Hiragino Sans GB',
+    'Microsoft YaHei',
+    sans-serif;
+}
+
+.authgate--plain {
+  font-size: 0.9rem;
+  color: #64748b;
+}
+
+.authgate__card {
+  width: min(400px, calc(100vw - 3rem));
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.12);
+  padding: 1.8rem 1.6rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.authgate__brand {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.authgate__sub {
+  margin: 0 0 0.3rem;
+  font-size: 0.84rem;
+  color: #64748b;
+}
+
+.authgate__input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.62rem 0.7rem;
+  border: 1px solid #d7dbe2;
+  border-radius: 9px;
+  font: inherit;
+  font-size: 0.9rem;
+  color: #0f172a;
+}
+
+.authgate__input:focus {
+  outline: none;
+  border-color: #0f172a;
+}
+
+.authgate__btn {
+  padding: 0.62rem 0.9rem;
+  border: none;
+  border-radius: 9px;
+  background: #0f172a;
+  color: #fff;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.authgate__btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.authgate__err {
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 0.82rem;
+}
+
+.authgate__note {
+  margin: 0.2rem 0 0;
+  font-size: 0.74rem;
+  line-height: 1.6;
+  color: #94a3b8;
+}
+
+.authgate__badge {
+  position: fixed;
+  right: 0.7rem;
+  bottom: 0.5rem;
+  z-index: 30;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.06);
+  color: #94a3b8;
+  font-size: 0.7rem;
+  pointer-events: none;
+  user-select: none;
+}

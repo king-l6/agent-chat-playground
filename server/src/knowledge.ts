@@ -631,6 +631,9 @@ const BUILTIN_DOCS: Array<{ docId: string; title: string; body: string }> = [
       '## 产品定位',
       '本地 Agent 交付工作台：Electron 可选仓库，产研泳道带闸门。不是 Cursor，也不是 Dify。控制面是人点的确认 / 撤回 / 放行 / 签字。',
       '',
+      '## 多条需求',
+      '工作台是一块面板：多条需求并行流转，每条有独立的 PRD、阶段、产物和对话，签完字的留在留档组。几条同时在跑互不干扰，各自推进。',
+      '',
       '## 角色',
       '交付页身份为产品 pm、研发 dev、评审 review、测试 qa。产品聊出 PRD 并勾验收后冻结；研发对着工作区改真实代码看 git diff；测试出意见、跑命令、签字。',
       '',
@@ -638,7 +641,7 @@ const BUILTIN_DOCS: Array<{ docId: string; title: string; body: string }> = [
       '未勾验收不能交给研发；确认后正文冻住，撤回才解冻；带风险放行必须写理由。状态是人话，不会自己往前跳。',
       '',
       '## 工作区沙箱',
-      '路径逃出仓库根目录会被拒绝；git 工具只读，不会 checkout。网页与桌面共用 #/settings 填 API Key。',
+      '路径逃出仓库根目录会被拒绝；git 工具只读，不会 checkout。每条需求可以绑不同仓库（绑了就在那棵目录里干活，基于 AsyncLocalStorage 做上下文局部 root，并发跑不会串），没绑的回落全局工作区。网页与桌面共用 #/settings 填 API Key。',
     ].join('\n'),
   },
   {

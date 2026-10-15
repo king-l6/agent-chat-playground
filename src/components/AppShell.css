@@ -164,8 +164,16 @@
 }
 
 .app__body > .kb,
-.app__body > .settings {
+.app__body > .settings,
+.app__body > .kb.settings {
+  height: 100%;
+  min-height: 0;
   overflow: auto;
+}
+
+/* 设置页自己管左右分栏与右侧滚动，外层不要再套一层滚动 */
+.app__body > .settings {
+  overflow: hidden;
 }
 
 .chrome {
@@ -277,98 +285,6 @@ a.badge {
   align-items: center;
   gap: 0.4rem;
   min-width: 0;
-}
-
-.wspick {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  background: rgba(28, 25, 20, 0.45);
-  display: grid;
-  place-items: center;
-  padding: 1.5rem;
-}
-
-.wspick__panel {
-  width: min(36rem, 100%);
-  max-height: min(32rem, 86vh);
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
-  gap: 0.55rem;
-  background: #f3ead8;
-  color: #241f1a;
-  border: 1px solid #c9bfae;
-  padding: 0.85rem 0.95rem 0.95rem;
-}
-
-.wspick__head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.wspick__head strong {
-  font-family: Palatino, 'Songti SC', 'STSong', serif;
-  font-size: 1.05rem;
-}
-
-.wspick__x,
-.wspick__jumps button,
-.wspick__ok {
-  border: 1px solid #241f1a;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 0.78rem;
-  font-weight: 650;
-  padding: 0.28rem 0.65rem;
-  cursor: pointer;
-}
-
-.wspick__cwd {
-  margin: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.72rem;
-  color: #5c554a;
-  word-break: break-all;
-}
-
-.wspick__jumps {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-}
-
-.wspick__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  overflow: auto;
-  border: 1px solid #c9bfae;
-  background: #f7f1e4;
-}
-
-.wspick__list button {
-  width: 100%;
-  text-align: left;
-  border: 0;
-  border-bottom: 1px solid #e4ddd0;
-  background: transparent;
-  padding: 0.45rem 0.65rem;
-  font: inherit;
-  font-size: 0.84rem;
-  cursor: pointer;
-}
-
-.wspick__list button:hover,
-.wspick__list button:focus-visible {
-  background: #efe1b8;
-}
-
-.wspick__ok {
-  background: #1f4d3a;
-  color: #f4efe4;
 }
 
 .wsbar__form input {
@@ -1143,4 +1059,71 @@ a.badge {
     flex-direction: column;
     align-items: stretch;
   }
+}
+
+/*
+ * 会话头：会话 id + 分享入口 / 只读标记。
+ * 放在消息流最上面、.rag-hint 之前——id 是「查链路」时和后端 [chat][<sid>] 日志对暗号用的，
+ * 得一直在，不能只在悬停时才露出来。
+ */
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+
+.chat-head__id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.01em;
+  cursor: help;
+}
+
+.chat-head__ro {
+  color: #b45309;
+  font-weight: 650;
+}
+
+.chat-head__share {
+  margin-left: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  background: #fff;
+  color: #475569;
+  font: inherit;
+  font-size: 0.71rem;
+  cursor: pointer;
+}
+
+.chat-head__share:hover {
+  border-color: #93c5fd;
+  color: #1d4ed8;
+}
+
+/* 「链接已复制」这类一次性提示，浮在输入框上方，不占消息流的位置 */
+.chat-toast {
+  margin: 0 0 0.4rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: 8px;
+  background: #ecfdf5;
+  color: #047857;
+  font-size: 0.74rem;
+}
+
+/* 只读态横幅：明确说清「这不是你的会话」，免得用户对着禁用的输入框发懵 */
+.readonly-note {
+  margin: 0 0 0.45rem;
+  padding: 0.4rem 0.65rem;
+  border-radius: 8px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 0.76rem;
+}
+
+.composer textarea:disabled {
+  cursor: not-allowed;
+  color: #94a3b8;
 }

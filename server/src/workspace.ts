@@ -1,76 +1,76 @@
 /**
  * 工作区沙箱（服务端）：Agent 工具只认这里的 root。
  * 路径必须是相对路径，realpath 之后仍落在 root 内，防止 ../ 和符号链接逃出。
+ *
+ * root 是两级的：全局默认（聊天页、about 用）+ 请求上下文临时覆盖（交付页每条需求各绑一个仓库）。
+ * 后者走 AsyncLocalStorage，绑在异步执行上下文上，随 await 链传播——
+ * 交付回合是 SSE、跨 await 跑几分钟，用「切全局 root 再恢复」会被让出的事件循环捅穿。
  */
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { DATA_DIR, REPO_ROOT } from './paths.js'
 
 const MAX_BYTES = 256 * 1024
 const FILE = path.join(DATA_DIR, 'workspace.json')
 
-let root: string | null = null
+const als = new AsyncLocalStorage<{ root: string }>()
+let defaultRoot: string | null = null
+
+/** 当前生效的 root：在 withWorkspaceRoot 作用域内用需求仓库，否则用全局默认 */
+function currentRoot(): string | null {
+  return als.getStore()?.root ?? defaultRoot
+}
 
 function restore() {
   try {
     const data = JSON.parse(fs.readFileSync(FILE, 'utf8')) as { root?: string }
     if (typeof data.root === 'string' && fs.existsSync(data.root) && fs.statSync(data.root).isDirectory()) {
-      root = fs.realpathSync(data.root)
+      const real = fs.realpathSync(data.root)
+      // 用**不抛**的判定，不用 try/catch：catch 分不清「白名单拒绝」和「代码自己炸了」。
+      // 这里踩过一个真的：restore() 在模块顶层跑，比 allowedCache 的 let 声明还早，
+      // 一进 listAllowedRoots 就 TDZ ReferenceError，被 catch 吞掉后打成
+      // 「不在允许列表内」—— 现象是「每次重启工作区就没了」，跟白名单毫无关系。
+      if (isAllowedRoot(real)) {
+        defaultRoot = real
+      } else {
+        // 白名单改过、这个目录不再允许 → 当作没选过。
+        // 不能让上次写下的值绕过白名单，否则改白名单等于没改。
+        console.warn(`[workspace] 上次的工作区不在允许列表内，忽略：${real}`)
+      }
     }
   } catch {
     /* 还没选过 */
   }
 }
 
-restore()
-
 export function getWorkspaceRoot() {
-  return root
+  return currentRoot()
+}
+
+/** 在这个仓库的作用域里跑一段逻辑（含其中所有 await）。交付回合最外层包一层。 */
+export function withWorkspaceRoot<T>(absRoot: string, fn: () => T): T {
+  const real = fs.realpathSync(absRoot)
+  if (!fs.statSync(real).isDirectory()) {
+    throw new Error('需求绑定的仓库不是目录')
+  }
+  assertAllowedRoot(real)
+  return als.run({ root: real }, fn)
 }
 
 export function suggestedHere() {
   return REPO_ROOT
 }
 
-/** 选工作区之前用：列出磁盘上的子目录，不限于当前 root。 */
-export function browseDisk(abs?: string) {
-  const home = os.homedir()
-  const requested = (abs || '').trim() || home
-  if (!path.isAbsolute(requested)) throw new Error('路径必须是绝对路径')
-  const start = fs.realpathSync(requested)
-  if (!fs.statSync(start).isDirectory()) throw new Error('不是目录')
-  const parent = path.dirname(start)
-  const entries: Array<{ name: string; path: string }> = []
-  for (const entry of fs.readdirSync(start, { withFileTypes: true })) {
-    if (entry.name === '.' || entry.name === '..' || entry.name.startsWith('.')) continue
-    const full = path.join(start, entry.name)
-    try {
-      if (!fs.statSync(full).isDirectory()) continue
-    } catch {
-      continue
-    }
-    entries.push({ name: entry.name, path: full })
-  }
-  entries.sort((a, b) => a.name.localeCompare(b.name, 'zh'))
-  return {
-    cwd: start,
-    parent: parent !== start ? parent : null,
-    home,
-    here: REPO_ROOT,
-    entries,
-  }
-}
-
 export function setWorkspaceRoot(next: string) {
-  const real = fs.realpathSync(next)
+  const real = assertAllowedRoot(fs.realpathSync(next))
   if (!fs.statSync(real).isDirectory()) {
     throw new Error('工作区必须是目录')
   }
-  root = real
+  defaultRoot = real
   fs.mkdirSync(DATA_DIR, { recursive: true })
-  fs.writeFileSync(FILE, JSON.stringify({ root }, null, 2), 'utf8')
-  return root
+  fs.writeFileSync(FILE, JSON.stringify({ root: defaultRoot }, null, 2), 'utf8')
+  return defaultRoot
 }
 
 function isInside(base: string, target: string) {
@@ -78,8 +78,75 @@ function isInside(base: string, target: string) {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
 }
 
+/**
+ * 允许当工作区的根目录白名单：PLAYGROUND_WORKSPACE_ALLOWLIST（冒号分隔的绝对路径）。
+ *
+ * 为什么必须有：工作区根会被 **bind mount 进沙箱容器**，也会被 workspace_read 直接读。
+ * 不限制的话，持令牌的人只要把工作区指到 /etc 或 ~/.ssh，就能借这两个能力把宿主机的
+ * 任意目录读出来 —— 令牌门禁就整个被绕过了。
+ * 换句话说：容器隔离的是「进程执行」，这份白名单隔离的是「文件访问」，两半都要有。
+ *
+ * 不配 = 不限制，保留本地开发的老行为；**服务器部署必须配**。
+ */
+let allowedCache: string[] | null = null
+
+export function listAllowedRoots(): string[] {
+  if (allowedCache) return allowedCache
+  const raw = process.env.PLAYGROUND_WORKSPACE_ALLOWLIST?.trim()
+  if (!raw) {
+    allowedCache = []
+    return allowedCache
+  }
+  allowedCache = raw
+    .split(':')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      try {
+        return fs.realpathSync(s)
+      } catch {
+        console.warn(`[workspace] 允许列表里的目录不存在，已忽略：${s}`)
+        return ''
+      }
+    })
+    .filter(Boolean)
+  return allowedCache
+}
+
+/**
+ * 校验一个**已 realpath 过**的根是否在白名单内，不在就抛。
+ *
+ * 特意要求传 realpath 后的值：白名单里写 /srv/repos，若有人把它换成指向 /etc 的软链，
+ * 这里比的是 realpath 的结果，绕不过去。
+ */
+/**
+ * 判定版本：不抛异常，只回答「在不在白名单里」。
+ *
+ * 恢复上次工作区（restore）这种**不该因为白名单就中断**的场景用它；
+ * 要「不在就报错拒绝」的场景用下面的 assertAllowedRoot。
+ */
+export function isAllowedRoot(realRoot: string): boolean {
+  const roots = listAllowedRoots()
+  if (roots.length === 0) return true // 没配 = 不限制
+  return roots.some((base) => isInside(base, realRoot))
+}
+
+/**
+ * 校验一个**已 realpath 过**的根是否在白名单内，不在就抛。
+ *
+ * 特意要求传 realpath 后的值：白名单里写 /srv/repos，若有人把它换成指向 /etc 的软链，
+ * 这里比的是 realpath 的结果，绕不过去。
+ */
+export function assertAllowedRoot(realRoot: string): string {
+  if (isAllowedRoot(realRoot)) return realRoot
+  throw new Error(
+    `这个目录不在允许的工作区列表里，不能在它上面干活。可用的根：${listAllowedRoots().join('、')}`,
+  )
+}
+
 /** 把用户给的相对路径钉死在 root 里；绝对路径直接拒绝 */
 export function resolveUnderRoot(relPath: string) {
+  const root = currentRoot()
   if (!root) throw new Error('未选择工作区。桌面壳菜单「文件 → 打开工作区」选一个目录。')
   const trimmed = relPath.trim() || '.'
   if (path.isAbsolute(trimmed)) {
@@ -105,7 +172,7 @@ export function resolveUnderRoot(relPath: string) {
 }
 
 function toRel(abs: string, name: string) {
-  const rel = path.relative(root ?? '', path.join(abs, name))
+  const rel = path.relative(currentRoot() ?? '', path.join(abs, name))
   return rel.split(path.sep).join('/')
 }
 
@@ -118,6 +185,17 @@ export function workspaceList(relPath = '.') {
     path: toRel(dir, entry.name),
   }))
 }
+
+/*
+ * 恢复上次的工作区，**必须放在文件最后**。
+ *
+ * 它经 isAllowedRoot → listAllowedRoots 读到模块级的 `let allowedCache`，
+ * 而那个声明在文件下半部分。模块顶层是按顺序求值的：这行要是写在声明之前，
+ * 访问 allowedCache 就是暂时性死区（TDZ）ReferenceError —— 而且当时被
+ * restore() 里的 catch 吞掉，伪装成「工作区不在允许列表内」，表现为
+ * 「每次重启服务，上次选的仓库就没了」。放最后就没有这个问题。
+ */
+restore()
 
 export function workspaceRead(relPath: string) {
   if (!relPath.trim()) throw new Error('缺少 path')
@@ -152,7 +230,7 @@ export type WorkspaceDigest = {
 }
 
 /** 根目录里这些不给模型看：不是项目信息，还会把清单撑爆（node_modules 一个就上千条） */
-const NOISE = new Set([
+export const NOISE = new Set([
   'node_modules',
   '.git',
   '.next',
@@ -189,7 +267,7 @@ const README_EXCERPT = 1200
  * 绝不把异常抛进聊天链路——工作区信息是锦上添花，不能因为它挂掉整轮对话。
  */
 export function workspaceDigest(): WorkspaceDigest | null {
-  const base = root
+  const base = currentRoot()
   if (!base) return null
   const digest: WorkspaceDigest = {
     root: base,

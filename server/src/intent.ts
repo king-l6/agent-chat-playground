@@ -8,13 +8,17 @@
  * MCP 元问题（有哪些 mcp）必须走 chat：收紧白名单会把已连接的 MCP 工具裁掉。
  */
 import type { ChatCompletionTool } from 'openai/resources/chat/completions'
-import { isMcpTool } from './mcp.js'
+import { isMcpTool, queryMatchesMcpTools } from './mcp.js'
 
 export type ChatIntent = 'time' | 'calc' | 'git' | 'workspace' | 'knowledge' | 'chat'
 
-const MCP_RE = /\bmcp\b|模型上下文|已连接.*工具/i
+/** 问「连上了哪些 MCP」——这是连接状态，不是工作区目录里的 mcp 文件夹 */
+const MCP_RE = /\bmcp\b|模型上下文|已连接的?工具|mcp\s*tools?/i
 const TIME_RE = /几点|时间|日期|\bnow\b|\btime\b/i
-const CALC_RE = /算|计算|\d+\s*[\+\-\*\/]/
+// 不要裸写「算」：「预算 / 结算 / 总算」都会误伤，整轮被收成 calculator。
+// 「算一下」也要带 lookbehind，否则「结算一下」照样命中。
+const CALC_RE =
+  /计算|等于多少|(?<![预结清总算核推])算(?:一下|一算|算)?|\d+\s*[\+\-\*\/]\s*\d+/
 const GIT_RE = /改了什么|当前改动|未提交|git status|git diff|有哪些改|看一下 diff/i
 const WORKSPACE_HINT_RE =
   /readme|\.md|工作区|这个项目|这个仓库|这个代码库|当前代码库|本仓库|读一下.*文件|打开.*文件|workspace_read/i
@@ -41,12 +45,17 @@ const TOOL_NAMES: Record<ChatIntent, string[] | null> = {
   chat: null,
 }
 
+/** 元问题：直接读 publicMcp，不要让模型去 workspace_list 翻「mcp」目录 */
+export function isMcpStatusQuery(text: string): boolean {
+  return MCP_RE.test(text.trim().toLowerCase())
+}
+
 export function routeIntent(text: string): ChatIntent {
   const raw = text.trim()
   if (!raw) return 'chat'
   const lower = raw.toLowerCase()
   // 问「有哪些 mcp」必须全量工具；否则白名单一收，模型侧只剩 search_notes / 工作区
-  if (MCP_RE.test(lower)) return 'chat'
+  if (isMcpStatusQuery(raw)) return 'chat'
   if (TIME_RE.test(lower)) return 'time'
   if (CALC_RE.test(raw)) return 'calc'
   if (GIT_RE.test(lower)) return 'git'
@@ -67,14 +76,21 @@ export function wantsKnowledge(text: string): boolean {
 export function filterToolsByIntent(
   tools: ChatCompletionTool[],
   intent: ChatIntent,
+  userQuery?: string,
 ): ChatCompletionTool[] {
   const names = TOOL_NAMES[intent]
-  if (!names) return tools
-  const allow = new Set(names)
+  const allow = names ? new Set(names) : null
   // MCP 始终保留：意图只收紧本地工具，不能把已连接的远端工具静默裁掉
-  return tools.filter(
+  let filtered = tools.filter(
     (t) =>
       t.type === 'function' &&
-      (allow.has(t.function.name) || isMcpTool(t.function.name)),
+      (allow === null || allow.has(t.function.name) || isMcpTool(t.function.name)),
   )
+  // 问句命中 MCP 能力时拿掉 search_notes：弱模型会先搜知识库，规则 7 一命中就收尾，业务 MCP 没机会
+  if (userQuery && queryMatchesMcpTools(userQuery)) {
+    filtered = filtered.filter(
+      (t) => t.type === 'function' && t.function.name !== 'search_notes',
+    )
+  }
+  return filtered
 }

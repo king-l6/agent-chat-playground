@@ -1,15 +1,19 @@
 /**
  * 工作区条：把「现在绑的是哪棵目录树」画出来。
  * 菜单里选完如果这里不更新，用户会以为没选上——A2 翻车就是这样。
+ *
+ * 选目录一律走系统弹窗：桌面壳用 Electron 的 dialog（挂在窗口上），
+ * 浏览器里让服务端调 macOS 原生选择器。两边都是同一个系统弹窗，没有自制文件浏览器。
  */
 import { useEffect, useState } from 'react'
 import {
-  browseWorkspace,
   fetchWorkspaceInfo,
+  isPickUnsupported,
   notifyWorkspaceChanged,
+  pickWorkspaceNative,
   setWorkspace,
-  type WorkspaceBrowse,
 } from '../api/chat'
+import { RepoPicker } from './RepoPicker'
 
 function folderName(root: string) {
   const parts = root.replace(/[\\/]+$/, '').split(/[\\/]/)
@@ -21,9 +25,8 @@ export function WorkspaceBar() {
   const [root, setRoot] = useState<string | null>(null)
   const [here, setHere] = useState('')
   const [error, setError] = useState('')
-  const [open, setOpen] = useState(false)
-  const [browse, setBrowse] = useState<WorkspaceBrowse | null>(null)
   const [busy, setBusy] = useState(false)
+  const [picking, setPicking] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -56,7 +59,6 @@ export function WorkspaceBar() {
   async function bind(next: string) {
     const bound = await setWorkspace(next)
     setRoot(bound)
-    setOpen(false)
     notifyWorkspaceChanged(bound)
   }
 
@@ -69,30 +71,20 @@ export function WorkspaceBar() {
           setRoot(next)
           notifyWorkspaceChanged(next)
         }
-        return
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
-        return
       }
+      return
     }
-    setOpen(true)
+    // 浏览器：服务端代弹系统目录选择器
     setBusy(true)
     try {
-      setBrowse(await browseWorkspace(root || here || undefined))
+      const dir = await pickWorkspaceNative('选择工作区')
+      if (dir) await bind(dir)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function go(dir: string) {
-    setBusy(true)
-    setError('')
-    try {
-      setBrowse(await browseWorkspace(dir))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      // 服务端不在 macOS 上（＝正经部署的 Linux 服务器）→ 没有系统弹窗，改从预置列表选
+      if (isPickUnsupported(err)) setPicking(true)
+      else setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
@@ -108,20 +100,18 @@ export function WorkspaceBar() {
     }
   }
 
-  async function onUseCwd() {
-    if (!browse) return
-    setError('')
-    try {
-      await bind(browse.cwd)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }
-
   const sameHere = Boolean(here && root && root === here)
 
   return (
     <div className={root ? 'wsbar wsbar--on' : 'wsbar'} role="status">
+      <RepoPicker
+        open={picking}
+        title="选择工作区"
+        onClose={() => setPicking(false)}
+        onPick={(dir) => {
+          void bind(dir).catch((err) => setError(err instanceof Error ? err.message : String(err)))
+        }}
+      />
       <div className="wsbar__text">
         <span className="wsbar__label">工作区</span>
         {root ? (
@@ -140,55 +130,10 @@ export function WorkspaceBar() {
             用这个项目
           </button>
         ) : null}
-        <button type="button" className="wsbar__btn" onClick={() => void onPick()}>
-          {isElectron ? (root ? '重选' : '选择目录') : root ? '换一个' : '选择目录'}
+        <button type="button" className="wsbar__btn" disabled={busy} onClick={() => void onPick()}>
+          {busy ? '选目录中…' : isElectron ? (root ? '重选' : '选择目录') : root ? '换一个' : '选择目录'}
         </button>
       </div>
-
-      {open && (
-        <div className="wspick" role="dialog" aria-label="选择目录">
-          <div className="wspick__panel">
-            <header className="wspick__head">
-              <strong>选一个仓库目录</strong>
-              <button type="button" className="wspick__x" onClick={() => setOpen(false)}>
-                取消
-              </button>
-            </header>
-            <p className="wspick__cwd" title={browse?.cwd}>
-              {browse?.cwd || (busy ? '在读目录…' : '')}
-            </p>
-            <div className="wspick__jumps">
-              {browse?.parent ? (
-                <button type="button" onClick={() => void go(browse.parent!)} disabled={busy}>
-                  上一级
-                </button>
-              ) : null}
-              {browse?.home ? (
-                <button type="button" onClick={() => void go(browse.home)} disabled={busy}>
-                  家目录
-                </button>
-              ) : null}
-              {browse?.here ? (
-                <button type="button" onClick={() => void go(browse.here)} disabled={busy}>
-                  这个项目
-                </button>
-              ) : null}
-            </div>
-            <ul className="wspick__list">
-              {(browse?.entries ?? []).map((entry) => (
-                <li key={entry.path}>
-                  <button type="button" onClick={() => void go(entry.path)} disabled={busy}>
-                    {entry.name}
-                  </button>
-                </li>
-              ))}
-            </ul>
-            <button type="button" className="wspick__ok" onClick={() => void onUseCwd()} disabled={!browse || busy}>
-              对准这一层
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

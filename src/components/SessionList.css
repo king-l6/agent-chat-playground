@@ -61,3 +61,45 @@
     display: none;
   }
 }
+
+/*
+ * 行内右上角叠两颗按钮（分享 + 删除）。
+ * AppShell.css 给 .sessions__item 只留了 1.6rem 的单颗位置，这里加宽到 3rem，
+ * 分享按钮摆在删除左边。特异性用 `.sessions .sessions__item`（多一个类）压过 AppShell.css——
+ * AppShell.css 在 App.tsx 里最后 import，同特异性会被它压回去。
+ */
+.sessions .sessions__item {
+  padding-right: 3rem;
+}
+
+.sessions__share {
+  position: absolute;
+  top: 0.35rem;
+  right: 1.55rem;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.sessions__list li:hover .sessions__share,
+.sessions__share:focus-visible {
+  opacity: 1;
+}
+
+.sessions__share:hover {
+  background: #e0e7ff;
+  color: #4338ca;
+}
+
+/* 「已分享」小标：提示这条对别人可见，但别抢标题的注意力 */
+.sessions__shared {
+  color: #6366f1;
+  font-weight: 650;
+}

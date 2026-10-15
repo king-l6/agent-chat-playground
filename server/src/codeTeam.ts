@@ -1,5 +1,6 @@
 /**
  * Chat「代码团队」：固定 explore → implement → review → summary。
+ * 这四段的顺序在 codeTeamGraph.ts 里用 LangGraph 串起来，模型调用走 LangChain。
  * workspace_write 不直接落盘，发 tool_approval 挂起，等人 POST /api/chat/approve。
  * 挂起记录写到磁盘：热重载后仍能按原参数批准/拒绝。
  *
@@ -18,17 +19,22 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import OpenAI from 'openai'
 import type {
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
   ChatCompletionTool,
 } from 'openai/resources/chat/completions'
 import { resolveLlmConfig } from './agent.js'
+import { createTeamModel, runCodeTeamGraph, type TeamModel } from './codeTeamGraph.js'
 import { wantsKnowledge } from './intent.js'
 import { DATA_DIR } from './paths.js'
 import { executeTool, getToolDefinitions } from './tools.js'
-import { getWorkspaceRoot, workspaceDigest, workspaceRead } from './workspace.js'
+import {
+  getWorkspaceRoot,
+  workspaceDigest,
+  workspaceRead,
+  type WorkspaceDigest,
+} from './workspace.js'
 import type { AgentRole, ChatMessageInput, SseEvent } from './types.js'
 
 type Send = (event: SseEvent) => void
@@ -335,11 +341,41 @@ const EVIDENCE_RULES = `证据规则（违反=骗人，严禁）：
 - 根目录摘要≠读过文件；不要靠猜写缺陷清单、排名、行号。
 - 没核实就写「未读到 / 未核实」，不要编。`
 
-function rolePrompt(role: AgentRole, userTask: string, tools: string[]): string {
+/**
+ * 空目录 ≠ 缺条件。之前空目录上的摘要是「根目录：」后面什么都没有，
+ * 探索把它读成「没有基础代码，无法操作」，后面三段跟着放弃，总结还写「无遗留风险」。
+ * 这里把「从零新建」明确告诉每个角色。
+ */
+const EMPTY_WORKSPACE_HINT = `工作区是空目录（可能也还不是 git 仓库）。这是「从零新建项目」，不是缺条件：
+- 不许以「工作区为空 / 没有基础代码 / 不是 git 仓库」为理由拒绝或不做，也不许让用户手动建文件。
+- workspace_write 会直接新建文件和父目录，不需要文件事先存在。
+- 探索：确认目录为空即可，按任务给出初始目录与文件规划（技术栈选最常见的、能直接跑起来的）。
+- 改码：按规划直接用 workspace_write 创建文件（含 README 与依赖清单），一次一个文件。
+- 评审：git 工具看不到 diff 时，用 workspace_list / workspace_read 核对本轮写入。`
+
+function isEmptyWorkspace(digest: WorkspaceDigest): boolean {
+  return digest.entries.length === 0 && digest.more === 0 && !digest.readme
+}
+
+/** 服务端记账的本轮写入结果，给评审/总结当硬事实，不靠模型回忆 */
+function writtenLine(written: string[]): string {
+  return written.length
+    ? `服务端记录：本轮 workspace_write 成功写入 ${written.length} 个文件：${written.join('、')}。`
+    : '服务端记录：本轮没有任何 workspace_write 成功，一个文件都没写。'
+}
+
+function rolePrompt(
+  role: AgentRole,
+  userTask: string,
+  tools: string[],
+  written: string[] = [],
+): string {
   const digest = workspaceDigest()
-  const ws = digest
-    ? `已连接工作区「${digest.name}」：${digest.root}\n根目录（仅文件名，不算已读）：${digest.entries.join(' ')}`
-    : '未连接工作区：先说明无法读盘，不要假装摸底。'
+  const ws = !digest
+    ? '未连接工作区：先说明无法读盘，不要假装摸底。'
+    : isEmptyWorkspace(digest)
+      ? `已连接工作区「${digest.name}」：${digest.root}\n${EMPTY_WORKSPACE_HINT}`
+      : `已连接工作区「${digest.name}」：${digest.root}\n根目录（仅文件名，不算已读）：${digest.entries.join(' ')}`
   const lang =
     '语言：最终回答用中文。内部思考 / reasoning 也必须用中文（能用中文就用中文，不要英文自言自语）。'
   const toolLine = tools.length
@@ -374,7 +410,8 @@ ${EVIDENCE_RULES}
 3. 更新导读只改 REPO_MAP.md。不要评审、不要空转列目录。
 4. 不查知识库/文档：改哪几个文件就只读那几个文件，别去 search_notes 找「文档怎么说」。
 5. 改完之后认真写「改了什么、验证到什么程度」，下一段（总结）会直接引用你的话；
-   没写成 / 被拒绝的文件要如实说，别把「申请写入」讲成「已改好」。`
+   没写成 / 被拒绝的文件要如实说，别把「申请写入」讲成「已改好」。
+6. 任务要求写代码，就必须真的发 workspace_write。「工作区为空 / 不是 git 仓库」不是不写的理由。`
   }
   if (role === 'summary') {
     return `你是代码团队的「总结」角色。只做本轮总结：不调工具、不改文件、不重新摸底。
@@ -388,10 +425,12 @@ ${EVIDENCE_RULES}
    本轮你没有任何工具，所以不许出现新的文件内容、行号、diff。
 2. 用中文写，固定三块，每块 1~3 行，不要长篇：
    **这轮做了什么** —— 按角色一句话带过（谁摸底、谁改了什么、谁评审结论如何）。
-   **动到的文件** —— 只写前面真正写入成功过的相对路径；一个都没成就写「本轮没有文件被写入」。
+   **动到的文件** —— 以下面「服务端记录」为准；一个都没成就写「本轮没有文件被写入」。
    **遗留 / 风险** —— 没做完的、被拒绝的、评审点出的必须修；没有就写「无」。
+   任务要求写/改代码而本轮一个文件都没写成功时，这块必须写「任务未完成」和原因，禁止写「无」。
 3. 前面角色没提过的一律不许补。缺证据写「未核实」，禁止编路径、编结论、编「已修复」。
-4. 不要复述大段 diff 或代码，不要重复粘贴前面三段原文。`
+4. 不要复述大段 diff 或代码，不要重复粘贴前面三段原文。
+${writtenLine(written)}`
   }
   return `你是代码团队的「评审」角色。只读、不写。
 任务：${userTask}
@@ -401,9 +440,12 @@ ${lang}
 ${EVIDENCE_RULES}
 硬性规则：
 1. 先 git_diff / git_status；要核对文件就同轮并行再读。
+   git 返回「还不是 git 仓库 / 没有 HEAD」时，改用 workspace_list / workspace_read 核对下面记录里的文件。
 2. 用中文短评：做对了什么、必须修、风险。只评 tool 里出现过的改动。
 3. 禁止 workspace_write。
-4. 不查知识库/文档：评审依据只有本轮 git 与文件工具返回，不要引「文档里写的规范」。`
+4. 不查知识库/文档：评审依据只有本轮 git 与文件工具返回，不要引「文档里写的规范」。
+5. 任务要求写代码而本轮一个文件都没写成功时，结论是「任务未完成」，不许说「无风险」。
+${writtenLine(written)}`
 }
 
 function toolEvidenceSummary(history: ChatCompletionMessageParam[]): string {
@@ -430,8 +472,7 @@ function maxToolRounds(role: AgentRole) {
 }
 
 async function forceTextClose(
-  client: OpenAI,
-  model: string,
+  model: TeamModel,
   role: AgentRole,
   history: ChatCompletionMessageParam[],
   send: Send,
@@ -451,18 +492,11 @@ async function forceTextClose(
             : '工具轮次已用完。不要再调用任何工具。只用下面证据用中文短评；没出现在证据里的改动不要评。') +
       `\n\n${evidence}\n\n${EVIDENCE_RULES}`,
   })
-  const stream = await client.chat.completions.create({
-    model,
-    messages: history,
-    stream: true,
-  })
   let text = ''
-  for await (const chunk of stream) {
+  for await (const delta of model.stream(history, [])) {
     if (signal.aborted) break
-    const delta = chunk.choices[0]?.delta
-    const reasoning = (delta as { reasoning_content?: string } | undefined)?.reasoning_content
-    if (reasoning) send({ type: 'reasoning_delta', delta: reasoning })
-    if (delta?.content) {
+    if (delta.reasoning_content) send({ type: 'reasoning_delta', delta: delta.reasoning_content })
+    if (delta.content) {
       text += delta.content
       send({ type: 'text_delta', delta: delta.content })
     }
@@ -478,7 +512,7 @@ async function runOneTool(
   signal: AbortSignal,
   tracked: Set<string>,
   announced: Set<string>,
-): Promise<{ content: string; aborted: boolean }> {
+): Promise<{ content: string; aborted: boolean; written?: string }> {
   if (call.type !== 'function') {
     return { content: JSON.stringify({ error: 'unsupported tool call' }), aborted: false }
   }
@@ -515,7 +549,9 @@ async function runOneTool(
     }
     const result = await executeTool(name, args, { userQuery: lastUser })
     send({ type: 'tool_result', id: call.id, name, result })
-    return { content: result, aborted: false }
+    // 走到这里 workspaceWrite 没抛，就是真落盘了：记下路径给评审/总结当硬事实
+    const written = name === 'workspace_write' ? parseWriteArgs(args).path.trim() : ''
+    return { content: result, aborted: false, written: written || undefined }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     send({ type: 'tool_error', id: call.id, name, error: message })
@@ -524,8 +560,7 @@ async function runOneTool(
 }
 
 async function runRoleLive(
-  client: OpenAI,
-  model: string,
+  model: TeamModel,
   role: AgentRole,
   allowed: string[],
   history: ChatCompletionMessageParam[],
@@ -534,6 +569,7 @@ async function runRoleLive(
   signal: AbortSignal,
   tracked: Set<string>,
   stepRef: { n: number },
+  written: string[],
 ) {
   send({ type: 'role_start', role })
   const tools = toolsNamed(allowed)
@@ -542,6 +578,13 @@ async function runRoleLive(
   const maxToolsPerRound = 32
 
   let usedTools = false
+  /*
+   * 改码段一次 workspace_write 都没发就想收工：追问一次。
+   * 实测 glm-4-flash 会认定「没有文件就没法 workspace_write」，然后让用户手动建，
+   * 提示词里写「必须写」它也不照做，所以在服务端兜一道，只兜一次，不死循环。
+   */
+  let triedWrite = false
+  let nudgedWrite = false
 
   for (let round = 0; round < toolRounds; round += 1) {
     if (signal.aborted) break
@@ -557,25 +600,14 @@ async function runRoleLive(
             : '先调 git_diff 或 git_status；需要核对就同轮并行再读。',
       })
     }
-    const stream = await client.chat.completions.create({
-      model,
-      messages: history,
-      tools: tools.length ? tools : undefined,
-      stream: true,
-    })
-
     let assistantText = ''
     const toolAcc = new Map<number, { id: string; name: string; arguments: string }>()
     const announced = new Set<string>()
     let stepped = false
 
-    for await (const chunk of stream) {
+    for await (const delta of model.stream(history, tools)) {
       if (signal.aborted) break
-      const choice = chunk.choices[0]
-      if (!choice) continue
-      const delta = choice.delta
-      const reasoning = (delta as { reasoning_content?: string } | undefined)?.reasoning_content
-      if (reasoning) send({ type: 'reasoning_delta', delta: reasoning })
+      if (delta.reasoning_content) send({ type: 'reasoning_delta', delta: delta.reasoning_content })
       // 先攒着：同轮若最终有 tool_calls，这段常是「还没读就编的结论」，不刷给用户
       if (delta?.content) assistantText += delta.content
       if (delta?.tool_calls) {
@@ -610,6 +642,27 @@ async function runRoleLive(
         function: { name: t.name, arguments: t.arguments || '{}' },
       }))
 
+    if (allCalls.some((c) => c.type === 'function' && c.function.name === 'workspace_write')) {
+      triedWrite = true
+    }
+    if (
+      allCalls.length === 0 &&
+      role === 'implement' &&
+      allowed.includes('workspace_write') &&
+      !triedWrite &&
+      !nudgedWrite
+    ) {
+      // 这段多半是「请您手动创建文件」，不刷给用户，留在 history 里让模型自己改口
+      nudgedWrite = true
+      if (assistantText) history.push({ role: 'assistant', content: assistantText })
+      history.push({
+        role: 'user',
+        content:
+          '你这一段还没调用过 workspace_write。workspace_write 会直接新建文件（父目录自动创建），不需要文件事先存在，也不需要用户手动建。任务要写/改代码的话，现在就调用 workspace_write 写第一个文件；任务确实不需要改文件，就只回一句「本轮无需改文件」和原因。',
+      })
+      continue
+    }
+
     // 纯文本轮才刷出来；带工具的轮把文字留给 history。
     // 首轮强制工具却空手：先别把胡话刷出去，交给 forceTextClose。
     if (allCalls.length === 0 && assistantText && !forceTool) {
@@ -619,7 +672,7 @@ async function runRoleLive(
 
     if (allCalls.length === 0) {
       if (forceTool) {
-        const closing = await forceTextClose(client, model, role, history, send, signal)
+        const closing = await forceTextClose(model, role, history, send, signal)
         send({ type: 'role_done', role })
         return closing || lastText
       }
@@ -638,6 +691,7 @@ async function runRoleLive(
 
     for (const call of runCalls) {
       const done = await runOneTool(call, allowed, lastUser, send, signal, tracked, announced)
+      if (done.written && !written.includes(done.written)) written.push(done.written)
       history.push({ role: 'tool', tool_call_id: call.id, content: done.content })
       if (done.aborted) {
         send({ type: 'role_done', role })
@@ -657,7 +711,7 @@ async function runRoleLive(
   }
 
   // 模型一直调工具不收口：再要一轮纯文字，不要再甩「上限」糊弄用户
-  const closing = await forceTextClose(client, model, role, history, send, signal)
+  const closing = await forceTextClose(model, role, history, send, signal)
   send({ type: 'role_done', role })
   return closing || lastText
 }
@@ -753,11 +807,15 @@ export async function runCodeTeamChat(options: {
   signal: AbortSignal
   /** 前端开关：本轮开始就让后续写入不再逐条挂起（高风险仍拦） */
   autoApprove?: boolean
+  /** 只用于日志打点（[chat][<sid>]），不参与逻辑；没带就是空串 */
+  sessionId?: string
 }) {
   const tracked = new Set<string>()
   const { send, messages, signal, autoApprove } = options
+  const sid = options.sessionId || '-'
   try {
     if (!getWorkspaceRoot()) {
+      console.log('[chat][%s] 代码团队：未连接工作区', sid)
       send({ type: 'error', message: '代码团队需要先连接工作区。请在聊天底部选一个本地仓库。' })
       send({ type: 'done' })
       return
@@ -767,12 +825,14 @@ export async function runCodeTeamChat(options: {
 
     const { apiKey, baseURL, model } = resolveLlmConfig()
     if (!apiKey) {
+      console.log('[chat][%s] 代码团队：mock 流式（没有 API Key）', sid)
       await runMock(messages, send, signal, tracked)
       return
     }
+    console.log('[chat][%s] 代码团队：live model=%s', sid, model)
 
     const lastUser = messages.filter((m) => m.role === 'user').at(-1)?.content ?? ''
-    const client = new OpenAI({ apiKey, baseURL })
+    const teamModel = createTeamModel({ apiKey, baseURL, model })
     send({ type: 'meta', mode: 'live', model })
 
     const transcript: ChatCompletionMessageParam[] = messages.map((m) => ({
@@ -781,44 +841,45 @@ export async function runCodeTeamChat(options: {
     }))
 
     /*
-     * 工具按意图给：explore 默认只有工作区 + git，只有这句像在问文档/知识库时
-     * 才加上 search_notes（见 exploreToolsFor）。implement 才有 workspace_write。
-     * 最后固定再跑一段 summary（不给工具）：前三段的结论会被拼进它的 transcript，
-     * 由它写「这轮做了什么 / 动到的文件 / 遗留与风险」——即用户看到的收尾总结。
+     * 四段顺序交给 LangGraph。工具按意图给：explore 默认只有工作区 + git，
+     * 只有这句像在问文档/知识库时才加上 search_notes（见 exploreToolsFor）。
+     * implement 才有 workspace_write。summary 不给工具，只根据前三段结论收尾。
+     * 写入批准仍在 runOneTool 里挂起，不改成图的 interrupt。
      */
-    const stages: Array<{ role: AgentRole; tools: string[] }> = [
-      { role: 'explore', tools: exploreToolsFor(lastUser) },
-      { role: 'implement', tools: IMPLEMENT_TOOLS },
-      { role: 'review', tools: REVIEW_TOOLS },
-      { role: 'summary', tools: SUMMARY_TOOLS },
-    ]
     const stepRef = { n: 0 }
-
-    for (const stage of stages) {
-      if (signal.aborted) break
-      const history: ChatCompletionMessageParam[] = [
-        { role: 'system', content: rolePrompt(stage.role, lastUser, stage.tools) },
-        ...transcript,
-      ]
-      const text = await runRoleLive(
-        client,
-        model,
-        stage.role,
-        stage.tools,
-        history,
-        lastUser,
-        send,
-        signal,
-        tracked,
-        stepRef,
-      )
-      if (text.trim()) {
-        transcript.push({
-          role: 'assistant',
-          content: `【${stage.role}】\n${text.trim()}`,
-        })
-      }
+    /* 本轮真正落盘的相对路径。每段开跑时才拼 system prompt，所以评审/总结拿到的是改码之后的值 */
+    const written: string[] = []
+    const toolsFor = (role: AgentRole): string[] => {
+      if (role === 'explore') return exploreToolsFor(lastUser)
+      if (role === 'implement') return IMPLEMENT_TOOLS
+      if (role === 'summary') return SUMMARY_TOOLS
+      return REVIEW_TOOLS
     }
+
+    await runCodeTeamGraph({
+      messages: transcript,
+      lastUser,
+      signal,
+      runStage: async (role, historySoFar) => {
+        const tools = toolsFor(role)
+        const history: ChatCompletionMessageParam[] = [
+          { role: 'system', content: rolePrompt(role, lastUser, tools, written) },
+          ...historySoFar,
+        ]
+        return runRoleLive(
+          teamModel,
+          role,
+          tools,
+          history,
+          lastUser,
+          send,
+          signal,
+          tracked,
+          stepRef,
+          written,
+        )
+      },
+    })
 
     send({ type: 'done' })
   } catch (err) {

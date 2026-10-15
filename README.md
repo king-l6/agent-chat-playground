@@ -22,6 +22,8 @@
 
 内核还在：`#/` 问「现在几点了？」看工具卡片；`#/canvas` 对照「人画的流程」。`npm run eval:rag` 原 8 题不能坏。
 
+会话也进了路由：地址栏是 `#/c/<归属人>/<会话id>`，刷新能回到同一条；点会话行上的「分享」会把链接复制到剪贴板（同时把它设为可分享），别人打开是**只读**。后端每条 `/api/chat` 打 `[chat][<会话id>] start|done|error`，对链路时按这个前缀 grep 就能定位到具体会话。
+
 ## 三套机制（口述核心）
 
 ```
@@ -38,7 +40,7 @@ RAG 是能力（切块 / 向量 / 关键词 / 重排 / 引用），可以挂在 
 
 | 页 | 地址 | 实际做了什么 |
 |----|------|----------------|
-| 对话 | `#/` | SSE；工具卡片；`load_skill` 读 `server/skills/*/SKILL.md`；可停止 |
+| 对话 | `#/`、`#/c/<归属人>/<会话id>` | SSE；工具卡片；`load_skill` 读 `server/skills/*/SKILL.md`；可停止。会话存服务端（私密/可分享），链接可发给别人只读打开 |
 | 文档 | `#/documents` | 上传 md/txt，增量进索引 |
 | 向量库 | `#/vectors` | 看 chunk、向量是否已编码 |
 | 编排 | `#/canvas` | 沿边执行；计算器节点；DAG；条件分流；图存 localStorage（不存运行结果） |
@@ -81,6 +83,69 @@ xattr -cr "/Applications/Agent Chat Playground.app"
 再双击即可。打包装载自带后端，先关掉本机已经占用 8790 的 `npm run dev`。  
 下载：https://github.com/king-l6/agent-chat-playground/releases/tag/v0.2.0
 
+## 服务器部署（内网团队形态）
+
+同一套代码，靠环境变量切成「一个 URL 打开就能用」的服务：前端静态由后端自己托管，进门要一把共享令牌，交付泳道跑测试命令时**每条命令起一个一次性容器**，不再直接落在宿主机上。
+
+```bash
+# 1) 装沙箱镜像（它由宿主 daemon 按名字起，不是 compose 的 service）
+docker build -f docker/sandbox.Dockerfile -t playground-sandbox:latest .
+
+# 2) 配 .env：令牌、仓库目录、沙箱 uid
+REPOS=/srv/repos                       # macOS 上换成你的真实路径
+echo "PLAYGROUND_ACCESS_TOKENS=alice:$(openssl rand -hex 24)" >> .env
+echo "PLAYGROUND_REPOS_ROOT=$REPOS"                           >> .env
+# 取目录属主。Linux 用 stat -c，macOS 用 stat -f
+echo "PLAYGROUND_SANDBOX_UID=$(stat -c '%u' "$REPOS")"        >> .env
+echo "PLAYGROUND_SANDBOX_GID=$(stat -c '%g' "$REPOS")"        >> .env
+
+# 3) 起
+docker compose up -d --build
+```
+
+浏览器打开 `http://<这台机器>:8790` → 出登录页 → 拿令牌进去。变量含义见 `.env.example` 末段。
+
+> 上面那三步里只有第 1 步需要网络（首次拉基础镜像 + 装 git/python3 那几样）。本机先跑通时
+> `REPOS` 直接用你现有的仓库父目录即可 —— 不需要真去建 `/srv/repos`。
+
+**必配的三样**（缺任何一个都会在起步阶段就拦下来，不会带病上线）：
+
+| 变量 | 不配的后果 |
+|---|---|
+| `PLAYGROUND_ACCESS_TOKENS` | 身份是前端自拟的 `X-Playground-User` 头，改一下就能读走别人的 Key / 会话；且「非回环监听 + 没令牌」会被启动保险**直接拒绝启动** |
+| `PLAYGROUND_WORKSPACE_ALLOWLIST` | 工作区能指到 `/etc`、`~/.ssh` —— 它会 bind mount 进沙箱、也会被 `workspace_read` 读，令牌门禁整个被绕过 |
+| `PLAYGROUND_SANDBOX_UID/GID` | 兜底成 0:0，沙箱以 root 写你的仓库，留下一堆 root 属主的文件 |
+
+发布前门禁（在喂过 wiki 的那台机器上跑）：
+
+```bash
+PLAYGROUND_EVAL_MIN_RECALL=0.8 npm run eval:rag   # 红了就别发
+```
+
+CI（lint / 四个 tsc 工程 / compose 校验 / 两个镜像构建 + 冒烟）见 `.github/workflows/ci.yml`。
+
+### 风险：挂了 docker.sock，就等于把那台机器交出去了
+
+沙箱容器是**宿主 daemon** 起的（DooD），所以 app 容器必须挂 `/var/run/docker.sock`。这意味着**能读这个 socket 的进程 ≈ 宿主 root** —— 拿到它就能 `docker run --privileged -v /:/host`，容器隔离对主进程自己不起作用。
+
+也就是说：令牌一旦泄漏、或白名单没配严，攻击面不是「读别人 Key」，而是**整台机器**。目前的缓解手段就三条，都不是技术兜底，是纪律：
+
+1. **令牌保密**，一人一把，别贴在群里；泄漏了就换（换掉 env 值即刻作废所有人的 cookie）。
+2. **白名单配严**，只放行真要它干活的仓库目录。
+3. **只在内网暴露**，别做端口映射到公网；能上 nginx 就顺手加个网段限制（`deploy/nginx.conf` 里有注释掉的 allow/deny）。
+
+不做 DinD 是因为它要 `--privileged` 且慢一个数量级；不做 socket-proxy 是因为即使限制了动词，自由 `-v` 挂载照样能读宿主机 —— 内网几个人的场景下不值得多一层。
+
+### 这一版还没验过的部分
+
+说实话，下面这些是**写好了但没跑过**的，别当成已验证的能力：
+
+- **`docker compose up` 全链路没跑过** —— 本机 Docker daemon 当时没起，两个镜像也还没 build 过。compose 文件只做过 `docker compose config` 的解析校验。
+- **沙箱容器没真跑过一条命令**（`PLAYGROUND_SANDBOX=docker` 这条路）。`commands.ts` 的白名单命令仍在宿主机上跑。
+- **DooD 路径对齐没实测**。这是最容易做错的一处：沙箱的 `-v <路径>:/work` 由宿主 daemon 解析，路径两边不一致会**静默挂上空目录**、命令「成功」跑在空气上。compose 里已经用 `create_host_path: false` 把「路径写错时替你建空目录」这个行为关掉了，但它只能挡住 app 容器**自己**那层挂载，挡不住 daemon 那层。第一次真跑通之后，用 `docker inspect` 核对实际的 `Source`。
+
+已经验过的（本机实测）：令牌登录闭环（含浏览器里 cookie 真的被带上）、非回环无令牌拒绝启动、白名单在「新开需求」和「事后改绑」两条写入路径上都拦住、伪造 `X-Playground-User` 无效、静态托管与 COOP/COEP、启动清 `.tmp`、eval 门禁在完整语料上 100% 通过。
+
 ## 简历可写（须能演示）
 
 - 用 Electron 做出可安装的本地 Agent 工作台：选仓库后受限读写文件，并读取 git status / diff
@@ -91,12 +156,19 @@ xattr -cr "/Applications/Agent Chat Playground.app"
 ## 有意没做（问到要承认）
 
 - 不是 Cursor / 通用 IDE，写文件锁在已选工作区，不碰 `.git` / `.env` / `node_modules`
-- 不是多租户、无登录；单人切 pm / dev / qa
+- **不是多租户。** 服务形态只加了「一层共享访问令牌」——它挡的是「内网随便谁打开就能读别人 Key」，
+  不是账号体系：没有注册、没有权限分级、没有租户隔离。知识库 / wiki / 交付泳道 / 画布这些继续是
+  **全团队共享**（只有会话、Key、MCP 配置按令牌归属人分开），所以 `POST /api/delivery/reset`
+  是对所有人生效的。本地开发形态没有登录，单人切 pm / dev / qa
 - 没有 Windows 安装包；macOS 包未签名
 - 确认后不能悄悄改文档；撤回不会自动 git checkout
 - 无理由不能跳过评审或测试
 - 不是分布式向量库；画布分流是正则；图画在 localStorage
 - MCP 要本机填 URL/Cookie（或从 Claude 导入），安装包里不带公司凭证；交付泳道不调 MCP
+- **交付页的产物预览只支持 `npm run dev` / `electron:dev`**：预览要跨源隔离（COOP/COEP 响应头）才
+  能跑 WebContainer，而打包后的安装包走 `file://`，响应头带不了，`crossOriginIsolated` 恒为 false。
+  面板会显示这条边界并给出该用哪个命令，PRD / diff / 闸门全不受影响。另外沙箱启动要外网
+  （运行时来自 StackBlitz CDN、`npm install` 走 registry），不通就报分类错误 + 原始日志，不挡交付
 
 ## 目录
 

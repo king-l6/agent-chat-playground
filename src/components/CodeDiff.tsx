@@ -54,6 +54,44 @@ export function SideBySideDiff({
   )
 }
 
+/**
+ * 只读看一个文件的当前内容。
+ * 预览面板里看「生成的代码」用这个，不复用 UnifiedDiff —— diff 是「改了什么」，
+ * 这里要的是「现在长什么样」。
+ */
+export function ReadonlyFile({
+  path,
+  value,
+  height = 420,
+}: {
+  path?: string
+  value: string
+  height?: number
+}) {
+  return (
+    <div className="code-diff">
+      {path ? <div className="code-diff__path">{path}</div> : null}
+      <div className="code-diff__editors" style={{ height }}>
+        <Editor
+          value={value}
+          path={path}
+          language={langOf(path)}
+          theme="vs"
+          options={{
+            readOnly: true,
+            minimap: { enabled: false },
+            scrollBeyondLastLine: false,
+            fontSize: 12,
+            lineNumbers: 'on',
+            wordWrap: 'off',
+            automaticLayout: true,
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
 /** Delivery 里的 git diff 文本 */
 export function UnifiedDiff({ text, height = 320 }: { text: string; height?: number }) {
   const clipped = text.length > 120_000 ? `${text.slice(0, 120_000)}\n…(已截断)` : text

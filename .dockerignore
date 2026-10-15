@@ -1,0 +1,31 @@
+# 构建上下文越小越快，也越不容易把不该进镜像的东西带进去。
+# 没有这个文件的话 `docker build .` 会把 node_modules（含 Electron 二进制）、
+# release/、以及 server/data 里那个 1.3G 的模型缓存全都传一遍。
+
+node_modules
+dist
+dist-server
+dist-electron
+release
+
+# 运行时数据：索引、会话、记忆、模型缓存。走卷，不进镜像。
+# 尤其是 models/，1.3G。
+server/data
+
+# 密钥。镜像里不要有 .env —— 而且 index.ts 的 dotenv 是 override:true，
+# 真带进去会盖掉 compose 设的环境变量。
+.env
+.env.*
+!.env.example
+
+.git
+.github
+.vscode
+.idea
+*.log
+*.tmp
+
+# 跟运行时无关的本地材料
+学习-海报对照缺口.md
+sse-oral.html
+REPO_MAP.md

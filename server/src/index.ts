@@ -2,9 +2,9 @@
  * Express 入口：健康检查 + SSE 聊天接口
  * 真正的 Agent 逻辑在 agent.ts
  */
-import cors from 'cors'
+import cors, { type CorsOptions } from 'cors'
 import dotenv from 'dotenv'
-import express from 'express'
+import express, { type NextFunction, type Request, type Response } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
 import multer from 'multer'
@@ -16,6 +16,16 @@ import {
   reconnectMcp,
   saveMcpSettings,
 } from './mcp.js'
+import { currentUserId, parseUserId, runWithUser } from './requestContext.js'
+import { publicUserEnv, saveUserEnv } from './userEnv.js'
+import {
+  deleteSession,
+  getSession,
+  isValidId,
+  listSessions,
+  upsertSession,
+  type SessionVisibility,
+} from './sessions.js'
 import {
   publicLlmSettings,
   resolveContextWindow,
@@ -24,9 +34,14 @@ import {
 } from './settings.js'
 import { IMAGE_ROUTE, imageFileById, isImageId, mimeOf } from './imageCache.js'
 import {
+  activateRun,
   applyGate,
+  bindRunWorkspace,
   changeSeat,
+  deleteDeliveryRun,
   publicDelivery,
+  publicDeliveryArtifacts,
+  publicRuns,
   runDeliveryTurn,
   startNewRun,
   updatePrd,
@@ -44,6 +59,20 @@ import {
   tempUploadFilename,
 } from './knowledge.js'
 import {
+  PDF_DIR,
+  commitPdf,
+  deletePdf,
+  ensurePdfDir,
+  getPdf,
+  isPdfId,
+  listPdfs,
+  pdfFilePath,
+  readPdfToc,
+  savePdfToc,
+  tempPdfFilename,
+  type PdfTocNode,
+} from './pdfs.js'
+import {
   deleteUploadedFile,
   ensureIndex,
   getRagStatus,
@@ -56,8 +85,11 @@ import {
   startWikiIngest,
 } from './retrieve.js'
 import type { ChatMessageInput, SseEvent } from './types.js'
-import { browseDisk, getWorkspaceRoot, setWorkspaceRoot, suggestedHere } from './workspace.js'
-import { REPO_ROOT } from './paths.js'
+import { pickFolderNative } from './nativePick.js'
+import { getWorkspaceRoot, listAllowedRoots, setWorkspaceRoot, suggestedHere } from './workspace.js'
+import { DATA_DIR, REPO_ROOT } from './paths.js'
+import { sweepStaleTmp } from './jsonStore.js'
+import { appendChatTrace, shortId, type ChatTrace } from './trace.js'
 import { getWikiRoot, listWikiTree, readWikiDoc } from './wiki.js'
 import {
   MEMORY_TYPES,
@@ -81,6 +113,19 @@ import { bibleImageFile, fileDigest, readBible, readLibrary, addLibraryImage, sa
 import { reviseLook, type LookKind } from './video/look.js'
 import { buildStoryboard, draftScript } from './video/storyboard.js'
 import { addVoice, listVoices, removeVoice, renameVoice, voicePath } from './video/voice.js'
+import {
+  assertSafeExposure,
+  authRequired,
+  clearLoginFails,
+  clearSessionCookie,
+  loginLocked,
+  matchToken,
+  noteLoginFail,
+  resolveIdentity,
+  setSessionCookie,
+} from './auth.js'
+import { cleanupOrphanContainers, sandboxStatus } from './sandbox/docker.js'
+import { sandboxMode } from './sandbox/config.js'
 
 dotenv.config({ path: path.join(REPO_ROOT, '.env'), override: true })
 if (process.env.PLAYGROUND_DATA) {
@@ -93,15 +138,155 @@ if (process.env.PLAYGROUND_DATA) {
 const app = express()
 const PORT = Number(process.env.PLAYGROUND_PORT || process.env.PORT || 8790)
 
-// 允许前端跨域（开发时 Vite 5176 → 后端 8790）
+/*
+ * CORS：默认**关闭**。
+ *
+ * 原来是 origin: true（反射任意来源）—— 在「谁都能调」的前提下只是松松垮垮，
+ * 但一旦身份改由 cookie 承载，反射来源就变成「任意网页都能带着用户 cookie 打这个后端」，
+ * 性质完全不同，必须收敛。
+ * 同源部署（前端由本服务托管）根本不需要 CORS；开发时 Vite 是**代理**到本进程，也是同源。
+ * 真要放行别的来源，用 PLAYGROUND_CORS_ORIGIN 显式列白名单（逗号分隔）。
+ *
+ * **但不能一刀切成 false**：打包后的 Electron 是从 file:// 加载 dist 的，
+ * 再回来调 http://127.0.0.1:8790（见 package.json 的 pack:app），这是跨源，
+ * Origin 头是字符串 "null"。以前靠 origin:true 反射着，直接关掉会让桌面壳所有请求被拦。
+ * 所以：没配令牌（＝桌面壳 / 本地开发）时放行 "null"；配了令牌（＝服务形态）时只认显式白名单。
+ *
+ * 本地开发也不全是同源：.env 里 VITE_API_BASE=http://127.0.0.1:8790 时，
+ * Vite 页面（5176）会绕过代理直连本进程（为了躲代理吞 SSE），同样是跨源，一并放行。
+ */
+const DEV_ORIGINS = ['http://127.0.0.1:5176', 'http://localhost:5176']
+const CORS_ORIGINS = (process.env.PLAYGROUND_CORS_ORIGIN || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+const corsOrigin: CorsOptions['origin'] = CORS_ORIGINS.length
+  ? CORS_ORIGINS
+  : authRequired()
+    ? false
+    : ['null', ...DEV_ORIGINS]
 app.use(
   cors({
-    origin: true,
+    origin: corsOrigin,
+    credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   }),
 )
-// 解析 JSON body，限制 1MB
-app.use(express.json({ limit: '1mb' }))
+/*
+ * 解析 JSON body。
+ * 上限从 1MB 提到 8MB：PUT /api/sessions/:id 会把整条会话（含工具结果里的文件片段）
+ * 一次性传上来，长会话 / 代码团队会话用 1MB 会 413。其余接口的 body 都很小。
+ */
+app.use(express.json({ limit: '8mb' }))
+
+/*
+ * 反代后面取真实客户端 IP。
+ * 登录限流按 IP 计数，不设这个的话 nginx 转发后所有人都是 127.0.0.1，
+ * 一个人试错会把所有人一起锁住。只在确实有反代时开。
+ */
+if (process.env.PLAYGROUND_TRUST_PROXY === '1') app.set('trust proxy', 1)
+
+/* ===================== 访问令牌门禁 ===================== */
+
+/**
+ * 免鉴权白名单：登录本身、探活、以及「前端问自己登没登录」。
+ * 按 originalUrl 判而不是 req.path —— 这个中间件挂在 '/api' 上，
+ * 挂载点内的 req.path 是去掉前缀的相对路径，用它判极易写错。
+ */
+const AUTH_EXEMPT = ['/api/auth/login', '/api/auth/session', '/api/health']
+
+function requireAuth(req: Request, res: Response, next: NextFunction) {
+  // 没配令牌 = Electron / 本地开发，行为完全不变
+  if (!authRequired()) return next()
+  const p = req.originalUrl.split('?')[0]
+  if (AUTH_EXEMPT.includes(p)) return next()
+  if (resolveIdentity(req)) return next()
+  res.status(401).json({ error: '需要访问令牌', code: 'unauthorized' })
+}
+
+app.post('/api/auth/login', (req, res) => {
+  if (!authRequired()) {
+    res.status(400).json({ error: '这个服务没有启用访问令牌，直接打开即可' })
+    return
+  }
+  const ip = req.ip || 'unknown'
+  if (loginLocked(ip)) {
+    res.status(429).json({ error: '尝试次数过多，请等一分钟再试' })
+    return
+  }
+  const token = String((req.body as { token?: unknown })?.token ?? '').trim()
+  const who = matchToken(token)
+  if (!who) {
+    const left = noteLoginFail(ip)
+    console.warn(`[auth] 登录失败 ip=${ip} 剩余尝试=${Math.max(left, 0)}`)
+    res.status(401).json({ error: '令牌不对' })
+    return
+  }
+  clearLoginFails(ip)
+  // 内网多半是 http，Secure 属性会让浏览器直接丢掉 cookie，所以默认不开
+  const secure = req.secure || process.env.PLAYGROUND_COOKIE_SECURE === '1'
+  setSessionCookie(res, token, secure)
+  console.log(`[auth] 登录成功 user=${who.name} ip=${ip}`)
+  res.json({ ok: true, user: who.name })
+})
+
+app.post('/api/auth/logout', (_req, res) => {
+  clearSessionCookie(res)
+  res.json({ ok: true })
+})
+
+app.get('/api/auth/session', (req, res) => {
+  const who = resolveIdentity(req)
+  res.json({
+    authRequired: authRequired(),
+    authenticated: Boolean(who) || !authRequired(),
+    user: who?.name ?? (authRequired() ? null : currentUserId()),
+  })
+})
+
+/* 只挂 '/api'：静态资源不带这个前缀 → 登录页天然免鉴权。
+   否则会出现「登录页自己要鉴权」的死循环。 */
+app.use('/api', requireAuth)
+
+/**
+ * 身份来源。这是本次改造的核心一步：
+ *   配了令牌 → 只认认证结果（cookie / Bearer），**彻底不再读 x-playground-user**；
+ *   没配令牌 → 才回落到前端自报的头（本地开发的老行为）。
+ * 原来无条件信任请求头，等于把「读别人 LLM Key / 会话」的权利交给任何会改头的人。
+ */
+app.use((req, _res, next) => {
+  const id = authRequired()
+    ? (resolveIdentity(req)?.name ?? 'local')
+    : parseUserId(req.header('x-playground-user'))
+  runWithUser(id, next)
+})
+
+/* ===================== 请求日志 ===================== */
+
+/**
+ * 一行一条，按前缀 grep 就能定位。
+ *
+ * 脱敏是硬要求，不是「顺手」：Authorization / Cookie / body 一律不进日志，
+ * query 里的 token / key 之类抹成 ***。日志文件常常是权限最松的地方，
+ * 把令牌或 API Key 写进去等于把门禁白做了。
+ * user 能取到是因为上面的身份中间件把后续处理都裹在了 als.run 里。
+ */
+const SECRET_QUERY = /([?&](?:token|key|api_?key|authorization|password|cookie)=)[^&]*/gi
+
+function redactUrl(url: string): string {
+  return url.replace(SECRET_QUERY, '$1***')
+}
+
+app.use((req, res, next) => {
+  const started = Date.now()
+  res.on('finish', () => {
+    console.log(
+      `[req] ${req.method} ${redactUrl(req.originalUrl)} ${res.statusCode} ` +
+        `${Date.now() - started}ms user=${currentUserId()} ip=${req.ip || '-'}`,
+    )
+  })
+  next()
+})
 
 ensureDataDirs()
 
@@ -115,11 +300,28 @@ const upload = multer({
   limits: { fileSize: 2 * 1024 * 1024 },
 })
 
-/** GET /api/health：前端徽章用，看 live/mock、模型名、RAG 索引 */
+/** 版本号，健康检查里报出来。读不到就算了，不该因为读 package.json 让服务起不来 */
+const VERSION = (() => {
+  try {
+    return String(
+      JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).version ?? '?',
+    )
+  } catch {
+    return '?'
+  }
+})()
+
+/**
+ * GET /api/health：前端徽章用，看 live/mock、模型名、RAG 索引。
+ * 也是探活接口（免鉴权），所以只出非敏感项：不报 workspace 绝对路径之外的用户数据，
+ * 沙箱状态也**不触发 docker 探活**（理由见 sandbox/docker.sandboxStatus 的注释）。
+ */
 app.get('/api/health', (_req, res) => {
   const { apiKey, model } = resolveLlmConfig()
   res.json({
     ok: true,
+    version: VERSION,
+    uptime: Math.round(process.uptime()),
     mode: apiKey ? 'live' : 'mock',
     model,
     /*
@@ -132,6 +334,8 @@ app.get('/api/health', (_req, res) => {
     skills: listSkills(),
     mcp: publicMcp(),
     workspace: { root: getWorkspaceRoot() },
+    auth: { required: authRequired() },
+    sandbox: { mode: sandboxMode(), ...sandboxStatus() },
   })
 })
 
@@ -654,6 +858,33 @@ app.put('/api/settings', (req, res) => {
   }
 })
 
+app.get('/api/env', (_req, res) => {
+  res.json(publicUserEnv())
+})
+
+app.put('/api/env', async (req, res) => {
+  const rows = Array.isArray(req.body?.vars) ? req.body.vars : null
+  if (!rows) {
+    res.status(400).json({ error: '需要 vars: [{ key, value?, keep? }]' })
+    return
+  }
+  try {
+    const saved = saveUserEnv(
+      rows.map((row: { key?: unknown; value?: unknown; keep?: unknown }) => ({
+        key: typeof row?.key === 'string' ? row.key : '',
+        value: typeof row?.value === 'string' ? row.value : undefined,
+        keep: row?.keep === true,
+      })),
+    )
+    // Cookie 等变了要重连 MCP
+    if (publicMcp().enabled) await reconnectMcp()
+    res.json(saved)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: message })
+  }
+})
+
 app.get('/api/mcp', (_req, res) => {
   res.json(publicMcp())
 })
@@ -689,6 +920,12 @@ app.post('/api/mcp/import-claude', async (_req, res) => {
 
 function parseSeat(raw: unknown): Seat | null {
   return raw === 'pm' || raw === 'dev' || raw === 'qa' ? raw : null
+}
+
+/** 需求 id；缺省（没传/不合法）由 store 回落到当前激活那条 */
+function parseRunId(raw: unknown): string | undefined {
+  const s = typeof raw === 'string' ? raw.trim() : ''
+  return /^[a-z0-9][a-z0-9-]{0,63}$/i.test(s) ? s : undefined
 }
 
 app.get('/api/video', (_req, res) => {
@@ -982,10 +1219,69 @@ app.get('/api/video/tasks/:id/film', (req, res) => {
   res.sendFile(file)
 })
 
-app.get('/api/delivery', (_req, res) => {
+app.get('/api/delivery', (req, res) => {
+  res.json(publicDelivery(parseRunId(req.query?.id)))
+})
+
+/** 预览用的产物包。可能很大（几百个文件），所以单独一条，不塞进 /api/delivery */
+app.get('/api/delivery/artifacts', (req, res) => {
+  try {
+    res.json(publicDeliveryArtifacts(parseRunId(req.query?.id)))
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+app.get('/api/delivery/runs', (_req, res) => {
+  res.json(publicRuns())
+})
+
+app.post('/api/delivery/runs', (req, res) => {
+  const root = typeof req.body?.workspaceRoot === 'string' ? req.body.workspaceRoot : undefined
+  try {
+    startNewRun(root ? { workspaceRoot: root } : undefined)
+    res.json(publicDelivery())
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+app.post('/api/delivery/runs/activate', (req, res) => {
+  const id = parseRunId(req.body?.id)
+  if (!id) {
+    res.status(400).json({ error: '缺少 id' })
+    return
+  }
+  activateRun(id)
   res.json(publicDelivery())
 })
 
+app.post('/api/delivery/runs/delete', (req, res) => {
+  const id = parseRunId(req.body?.id)
+  if (!id) {
+    res.status(400).json({ error: '缺少 id' })
+    return
+  }
+  deleteDeliveryRun(id)
+  res.json(publicDelivery())
+})
+
+app.put('/api/delivery/runs/workspace', (req, res) => {
+  const id = parseRunId(req.body?.id)
+  if (!id) {
+    res.status(400).json({ error: '缺少 id' })
+    return
+  }
+  const root = typeof req.body?.root === 'string' ? req.body.root : undefined
+  try {
+    bindRunWorkspace(id, root)
+    res.json(publicDelivery(id))
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+// 老前端仍在调；语义变成「新开一条需求」，不再覆盖当前那条
 app.post('/api/delivery/reset', (_req, res) => {
   startNewRun()
   res.json(publicDelivery())
@@ -997,24 +1293,29 @@ app.put('/api/delivery/seat', (req, res) => {
     res.status(400).json({ error: 'seat 必须是 pm / dev / qa' })
     return
   }
-  changeSeat(seat)
-  res.json(publicDelivery())
+  changeSeat(seat, parseRunId(req.body?.id))
+  res.json(publicDelivery(parseRunId(req.body?.id)))
 })
 
 app.put('/api/delivery/prd', (req, res) => {
   const actor = parseSeat(req.body?.actor)
+  const id = parseRunId(req.body?.id)
   if (!actor) {
     res.status(400).json({ error: 'actor 必须是 pm / dev / qa' })
     return
   }
   try {
-    updatePrd(actor, {
-      title: typeof req.body?.title === 'string' ? req.body.title : undefined,
-      oneLiner: typeof req.body?.oneLiner === 'string' ? req.body.oneLiner : undefined,
-      body: typeof req.body?.body === 'string' ? req.body.body : undefined,
-      acceptance: Array.isArray(req.body?.acceptance) ? req.body.acceptance : undefined,
-    })
-    res.json(publicDelivery())
+    updatePrd(
+      actor,
+      {
+        title: typeof req.body?.title === 'string' ? req.body.title : undefined,
+        oneLiner: typeof req.body?.oneLiner === 'string' ? req.body.oneLiner : undefined,
+        body: typeof req.body?.body === 'string' ? req.body.body : undefined,
+        acceptance: Array.isArray(req.body?.acceptance) ? req.body.acceptance : undefined,
+      },
+      id,
+    )
+    res.json(publicDelivery(id))
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     res.status(err instanceof GateError ? 400 : 500).json({
@@ -1027,16 +1328,22 @@ app.put('/api/delivery/prd', (req, res) => {
 app.post('/api/delivery/gate', (req, res) => {
   const actor = parseSeat(req.body?.actor)
   const action = req.body?.action as GateAction
+  const id = parseRunId(req.body?.id)
   if (!actor) {
     res.status(400).json({ error: 'actor 必须是 pm / dev / qa' })
     return
   }
   try {
-    applyGate(actor, action, {
-      reason: typeof req.body?.reason === 'string' ? req.body.reason : undefined,
-      questions: Array.isArray(req.body?.questions) ? req.body.questions.map(String) : undefined,
-    })
-    res.json(publicDelivery())
+    applyGate(
+      actor,
+      action,
+      {
+        reason: typeof req.body?.reason === 'string' ? req.body.reason : undefined,
+        questions: Array.isArray(req.body?.questions) ? req.body.questions.map(String) : undefined,
+      },
+      id,
+    )
+    res.json(publicDelivery(id))
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     res.status(err instanceof GateError ? 400 : 500).json({
@@ -1046,9 +1353,27 @@ app.post('/api/delivery/gate', (req, res) => {
   }
 })
 
+/**
+ * SSE 心跳。
+ *
+ * 为什么必须有：中间隔一层 nginx，proxy_read_timeout 默认 60s。模型思考期间
+ * 可能几十秒不吐 token，代理会认定连接死了直接掐断，前端看到的就是「莫名中断」。
+ * 定期写一行 SSE **注释**（`:...`）能把连接顶住 —— 注释不是事件，前端解析器会忽略。
+ * unref 是为了别让这个定时器拖住进程退出。
+ */
+function heartbeat(res: Response, isClosed: () => boolean): NodeJS.Timeout {
+  const t = setInterval(() => {
+    if (isClosed() || res.writableEnded) return
+    res.write(':\n\n')
+  }, 15_000)
+  t.unref?.()
+  return t
+}
+
 app.post('/api/delivery/turn', async (req, res) => {
   const actor = parseSeat(req.body?.actor)
   const message = typeof req.body?.message === 'string' ? req.body.message : ''
+  const id = parseRunId(req.body?.id)
   if (!actor) {
     res.status(400).json({ error: 'actor 必须是 pm / dev / qa' })
     return
@@ -1062,8 +1387,11 @@ app.post('/api/delivery/turn', async (req, res) => {
   res.flushHeaders?.()
   res.write(`:${' '.repeat(2048)}\n\n`)
   let closed = false
+  // 开场那 2KB padding 只负责顶穿代理缓冲；研发/测试动辄几十秒不出字，还得靠周期心跳
+  const hb = heartbeat(res, () => closed)
   res.on('close', () => {
     closed = true
+    clearInterval(hb)
   })
   const send = (event: SseEvent) => {
     if (closed || res.writableEnded) return
@@ -1073,7 +1401,7 @@ app.post('/api/delivery/turn', async (req, res) => {
   }
   send({ type: 'text_delta', delta: '研发回合已接上。\n' })
   try {
-    await runDeliveryTurn(actor, message, send)
+    await runDeliveryTurn(actor, message, send, id)
   } catch (err) {
     const messageText = err instanceof Error ? err.message : String(err)
     if (err instanceof GateError) {
@@ -1091,13 +1419,53 @@ app.get('/api/workspace', (_req, res) => {
   res.json({ root: getWorkspaceRoot(), here: suggestedHere() })
 })
 
-app.get('/api/workspace/browse', (req, res) => {
-  const dir = typeof req.query.dir === 'string' ? req.query.dir : ''
+/**
+ * 服务器形态下「从列表选仓库」的数据源。
+ *
+ * 只列白名单根 + 它们的直接子目录（像仓库的那些），**不接受前端传任意路径** ——
+ * 没有自由浏览，就没有路径穿越面。这是刻意收窄的：宁可功能少一点，
+ * 也不给「持令牌者把工作区指到 /etc」留口子。
+ */
+app.get('/api/workspace/allowed', (_req, res) => {
+  const isRepoRoot = (p: string) =>
+    fs.existsSync(path.join(p, '.git')) || fs.existsSync(path.join(p, 'package.json'))
+  const allowed = listAllowedRoots().map((root) => {
+    let repos: { name: string; path: string }[] = []
+    try {
+      repos = fs
+        .readdirSync(root, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+        .map((e) => ({ name: e.name, path: path.join(root, e.name) }))
+        .filter((e) => isRepoRoot(e.path))
+    } catch {
+      /* 读不动就只给根本身 */
+    }
+    return { root, name: path.basename(root) || root, isRepo: isRepoRoot(root), repos }
+  })
+  res.json({ allowed, allowlistEnabled: allowed.length > 0 })
+})
+
+/**
+ * 弹系统目录选择器，只返回选中的路径（不落任何状态，调用方自己决定绑到哪儿）。
+ * 阻塞到用户选完或取消；取消返回 { root: null }。
+ *
+ * 只有 macOS 有（nativePick 走 osascript）。服务器上没这回事，直接 501 说清替代路径，
+ * 别让前端拿到一个看不懂的报错。
+ */
+app.post('/api/workspace/pick', async (req, res) => {
+  if (process.platform !== 'darwin') {
+    res.status(501).json({
+      error:
+        '服务形态下没有系统目录选择器。请从「可用仓库列表」里选，' +
+        '或让管理员把目录加进 PLAYGROUND_WORKSPACE_ALLOWLIST。',
+    })
+    return
+  }
+  const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.slice(0, 40) : '选择目录'
   try {
-    res.json(browseDisk(dir || undefined))
+    res.json({ root: await pickFolderNative(prompt) })
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(400).json({ error: message })
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
   }
 })
 
@@ -1301,6 +1669,159 @@ app.delete('/api/knowledge/docs/:docId', async (req, res) => {
 })
 
 /**
+ * PDF 阅读器：只存不检索，所以**不碰 index.json**，跟 wiki 批量入库互不干扰。
+ *
+ * 目录不在服务端算：pdf.js 已经在浏览器里解析这份文件了，书签（getOutline）和
+ * 文本层（getTextContent 带字号）都是现成的，再让 Node 端装一套解析器纯属重复劳动。
+ * 前端算完 PUT 回来缓存，下次打开直接读。
+ */
+const pdfUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      ensurePdfDir()
+      cb(null, PDF_DIR)
+    },
+    filename: (_req, _file, cb) => cb(null, tempPdfFilename()),
+  }),
+  // 面试指南这类书动辄上百 MB，但也不能不设上限
+  limits: { fileSize: 200 * 1024 * 1024 },
+})
+
+/** 目录是前端传上来的外部输入：层级、长度、节点数都得自己夹一遍再落盘 */
+const MAX_TOC_NODES = 5000
+function normalizeToc(raw: unknown): PdfTocNode[] {
+  let budget = MAX_TOC_NODES
+  const walk = (list: unknown, level: number): PdfTocNode[] => {
+    if (!Array.isArray(list) || level > 6) return []
+    const out: PdfTocNode[] = []
+    for (const item of list) {
+      if (budget <= 0) break
+      if (!item || typeof item !== 'object') continue
+      const node = item as Record<string, unknown>
+      const title = String(node.title ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 200)
+      const page = Math.trunc(Number(node.page))
+      if (!title || !Number.isFinite(page) || page < 1) continue
+      budget -= 1
+      const y = Number(node.y)
+      const kids = walk(node.children, level + 1)
+      const rec: PdfTocNode = { title, page, y: Number.isFinite(y) ? y : 0, level }
+      if (kids.length > 0) rec.children = kids
+      out.push(rec)
+    }
+    return out
+  }
+  return walk(raw, 1)
+}
+
+app.get('/api/pdfs', (_req, res) => {
+  res.json({ pdfs: listPdfs() })
+})
+
+/** POST /api/pdfs 表单字段名 file，只收 .pdf */
+app.post('/api/pdfs', pdfUpload.single('file'), (req, res) => {
+  const file = req.file
+  if (!file) {
+    res.status(400).json({ error: '请选择文件' })
+    return
+  }
+  const name = decodeMulterName(file.originalname)
+  const discard = () => {
+    try {
+      fs.unlinkSync(file.path)
+    } catch {
+      /* 清理失败不该盖掉真正的错因 */
+    }
+  }
+  if (!/\.pdf$/i.test(name)) {
+    discard()
+    res.status(400).json({ error: '仅支持 .pdf' })
+    return
+  }
+  // multer 只看请求头里的文件名，改个后缀什么都能塞进来；再认一下文件头
+  let head = ''
+  try {
+    const fd = fs.openSync(file.path, 'r')
+    try {
+      const buf = Buffer.alloc(5)
+      fs.readSync(fd, buf, 0, 5, 0)
+      head = buf.toString('latin1')
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    /* 读不到就按不合规处理 */
+  }
+  if (!head.startsWith('%PDF-')) {
+    discard()
+    res.status(400).json({ error: '这不是有效的 PDF 文件' })
+    return
+  }
+  try {
+    res.json({ ok: true, pdf: commitPdf(file.path, name, file.size) })
+  } catch (err) {
+    discard()
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
+  }
+})
+
+/** 前端用 axios 取 arraybuffer 再喂给 pdf.js，所以这里只当静态文件吐 */
+app.get('/api/pdfs/:id/file', (req, res) => {
+  const id = String(req.params.id)
+  const rec = getPdf(id)
+  const file = pdfFilePath(id)
+  if (!rec || !file) {
+    res.status(404).json({ error: 'PDF 不存在' })
+    return
+  }
+  // 中文名直接写 filename= 会变乱码，用 RFC 5987 的 filename*
+  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(rec.name)}`)
+  res.sendFile(file, (err) => {
+    // 读到一半关页面会让 sendFile 报 aborted，那不是服务端错误
+    if (err && !res.headersSent) res.status(500).json({ error: '读取失败' })
+  })
+})
+
+app.get('/api/pdfs/:id/toc', (req, res) => {
+  const id = String(req.params.id)
+  if (!getPdf(id)) {
+    res.status(404).json({ error: 'PDF 不存在' })
+    return
+  }
+  res.json({ toc: readPdfToc(id) })
+})
+
+app.put('/api/pdfs/:id/toc', (req, res) => {
+  const id = String(req.params.id)
+  if (!isPdfId(id) || !getPdf(id)) {
+    res.status(404).json({ error: 'PDF 不存在' })
+    return
+  }
+  const source = req.body?.source === 'outline' ? 'outline' : 'infer'
+  const pages = Math.trunc(Number(req.body?.pages ?? 0)) || 0
+  const nodes = normalizeToc(req.body?.nodes)
+  try {
+    res.json({ ok: true, pdf: savePdfToc(id, source, nodes, pages) })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
+  }
+})
+
+app.delete('/api/pdfs/:id', (req, res) => {
+  try {
+    deletePdf(String(req.params.id))
+    res.json({ ok: true, pdfs: listPdfs() })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(404).json({ error: message })
+  }
+})
+
+/**
  * POST /api/workflow/run
  * body: { question, pipeline: [{ id, kind, expression? }] }
  */
@@ -1353,8 +1874,10 @@ app.post('/api/workflow/run', async (req, res) => {
     res.setHeader('X-Accel-Buffering', 'no')
     res.flushHeaders?.()
     let closed = false
+    const hb = heartbeat(res, () => closed)
     res.on('close', () => {
       closed = true
+      clearInterval(hb)
     })
     const send = (event: unknown) => {
       if (closed || res.writableEnded) return
@@ -1384,6 +1907,82 @@ app.post('/api/workflow/run', async (req, res) => {
 })
 
 /**
+ * 会话存取（见 sessions.ts）。
+ *
+ * 会话永远是「归属人自己的」：写入一律落在 currentUserId() 名下，
+ * **不接受代写别人的会话**；读取时只有归属人本人、或对方把这条设为 shared，才放行。
+ *
+ *   GET    /api/sessions                 列自己的会话（含 messages，前端一次拉全量）
+ *   GET    /api/sessions/:ownerId/:id    按归属人读 —— 分享链接 #/c/<ownerId>/<id> 走这条
+ *   PUT    /api/sessions/:id             落盘一条（owner = 自己）
+ *   DELETE /api/sessions/:id             删一条（owner = 自己）
+ */
+
+/** 把 PUT 上来的 body 收成一条会话。ownerId 用当前用户，**忽略 body 里的 ownerId**（否则能代写别人） */
+function sessionFromBody(req: express.Request, ownerId: string, id: string) {
+  const body = (req.body ?? {}) as Record<string, unknown>
+  return {
+    id,
+    ownerId,
+    title: typeof body.title === 'string' ? body.title : '新对话',
+    lastUserAt: typeof body.lastUserAt === 'number' ? body.lastUserAt : Date.now(),
+    updatedAt: typeof body.updatedAt === 'number' ? body.updatedAt : Date.now(),
+    visibility: (body.visibility === 'shared' ? 'shared' : 'private') as SessionVisibility,
+    messages: Array.isArray(body.messages) ? body.messages : [],
+  }
+}
+
+app.get('/api/sessions', (_req, res) => {
+  res.json({ sessions: listSessions(currentUserId()) })
+})
+
+app.get('/api/sessions/:ownerId/:id', (req, res) => {
+  const { ownerId, id } = req.params
+  if (!isValidId(ownerId) || !isValidId(id)) {
+    res.status(400).json({ error: 'id 不合法' })
+    return
+  }
+  const session = getSession(ownerId, id)
+  if (!session) {
+    res.status(404).json({ error: '会话不存在' })
+    return
+  }
+  /*
+   * 别人的会话：只有设成 shared 才可读，否则 403。
+   * 这里用 403 而不是 404，是为了让「分享链接打不开」的人看到「对方未分享」，
+   * 而不是含糊的「不存在」——本地单机场景，不值得为防探测牺牲可诊断性。
+   */
+  if (ownerId !== currentUserId() && session.visibility !== 'shared') {
+    res.status(403).json({ error: '对方未分享这条会话' })
+    return
+  }
+  res.json({ session })
+})
+
+app.put('/api/sessions/:id', (req, res) => {
+  const id = req.params.id
+  if (!isValidId(id)) {
+    res.status(400).json({ error: 'id 不合法' })
+    return
+  }
+  try {
+    const saved = upsertSession(sessionFromBody(req, currentUserId(), id))
+    res.json({ ok: true, session: saved })
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+app.delete('/api/sessions/:id', (req, res) => {
+  const id = req.params.id
+  if (!isValidId(id)) {
+    res.status(400).json({ error: 'id 不合法' })
+    return
+  }
+  res.json({ ok: deleteSession(currentUserId(), id) })
+})
+
+/**
  * POST /api/chat：开一条 SSE，把 Agent 事件不断 write 给前端
  * Content-Type: text/event-stream
  */
@@ -1400,6 +1999,11 @@ app.post('/api/chat', async (req, res) => {
    * 高风险文件（.env / 密钥 / CI）后端仍会拦，见 codeTeam.canAutoApprove。
    */
   const autoApprove = req.body?.autoApprove === true
+  /*
+   * 会话 id：标记「这一轮属于哪个会话」，供按 [chat][<sid>] 查链路。
+   * 不合法 / 没带就是空串——老前端、脚本调用都不会因此报错。
+   */
+  const sid = isValidId(req.body?.sessionId) ? (req.body.sessionId as string) : ''
 
   // 只保留合法 user/assistant，并截断过长 content，防滥用
   const normalized = messages
@@ -1421,18 +2025,38 @@ app.post('/api/chat', async (req, res) => {
 
   let closed = false
   const abort = new AbortController()
+  // 三个 SSE 口里最容易长时间沉默的一个：Agent 循环 + 工具调用，中间没有 token 输出
+  const hb = heartbeat(res, () => closed)
   // 注意：不要用 req.on('close') —— POST body 读完就可能触发，会误停 SSE
   res.on('close', () => {
     closed = true
+    clearInterval(hb)
     abort.abort()
   })
 
+  /*
+   * trace 旁路采集：只观察流过的 SSE 事件，不参与对话逻辑（见 trace.ts）。
+   * tools 收 tool_start 的 name，model 收 meta.model，error 收 error.message。
+   */
+  const traceTools: string[] = []
+  let traceModel: string | undefined
+  let traceError: string | undefined
+
   /** 写一条 SSE：data: {...}\n\n */
   const send = (event: SseEvent) => {
+    if (event.type === 'tool_start') traceTools.push(event.name)
+    else if (event.type === 'meta') traceModel = event.model
+    else if (event.type === 'error') traceError = event.message
     if (closed || res.writableEnded) return
     res.write(`data: ${JSON.stringify(event)}\n\n`)
   }
 
+  /*
+   * 链路日志：按 [chat][<sid>] 前缀过滤，就能捞出某个会话的全部回合。
+   * 界面显示的短 id、URL 里的 id 与这里的 sid 必须是同一个值。
+   */
+  console.log('[chat][%s] start mode=%s messages=%d', sid || '-', chatMode, normalized.length)
+  const startedAt = Date.now()
   try {
     if (chatMode === 'code_team') {
       await runCodeTeamChat({
@@ -1440,16 +2064,33 @@ app.post('/api/chat', async (req, res) => {
         send,
         signal: abort.signal,
         autoApprove,
+        sessionId: sid,
       })
     } else {
-      await runAgentChat({ messages: normalized, send })
+      await runAgentChat({ messages: normalized, send, sessionId: sid })
     }
+    console.log('[chat][%s] done %dms', sid || '-', Date.now() - startedAt)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    traceError = message
+    console.log('[chat][%s] error %dms %s', sid || '-', Date.now() - startedAt, message)
     send({ type: 'error', message })
     send({ type: 'done' })
   } finally {
     if (!closed) res.end()
+    // trace 落盘：一行 JSONL，fail-open（trace.ts 内部吞异常），不影响已结束的响应
+    const trace: ChatTrace = {
+      ts: new Date().toISOString(),
+      sessionId: sid || shortId(),
+      mode: chatMode,
+      model: traceModel,
+      tools: traceTools,
+      durationMs: Date.now() - startedAt,
+      turns: normalized.filter((m) => m.role === 'user').length,
+      ok: !traceError,
+      error: traceError,
+    }
+    appendChatTrace(trace)
   }
 })
 
@@ -1675,13 +2316,80 @@ app.get('/api/memory/log', (req, res) => {
   res.json({ items: readMemoryLog(Number.isFinite(limit) ? limit : 100) })
 })
 
+/* ===================== 前端静态托管 ===================== */
+
+const DIST_DIR = path.join(REPO_ROOT, 'dist')
+
+/*
+ * 交付页的产品预览要在浏览器里跑 WebContainer，它依赖 SharedArrayBuffer，
+ * 页面必须处于「跨源隔离」状态 —— 也就是下面这两个头。
+ *
+ * 原来它们只配在 vite.config.ts 的 dev server 上（server.headers），换成 Express
+ * 托管之后必须原样搬过来。漏了的症状很阴：**不报错**，只是预览功能悄悄起不来。
+ * 用 credentialless 而不是文档主推的 require-corp —— Monaco 从 CDN 拉脚本、
+ * 聊天页有一堆远程图，require-corp 会把它们全裂掉。
+ *
+ * 注册在所有路由之后：只让「落到静态资源」的请求拿到这两个头，
+ * /api 的响应不需要（也就不会给 SSE 添乱）。
+ */
+export function attachStaticFrontend() {
+  if (process.env.PLAYGROUND_EMBEDDED === '1') return // Electron 从 file:// 加载，不走这里
+  app.use((_req, res, next) => {
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
+    res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless')
+    next()
+  })
+  if (fs.existsSync(DIST_DIR)) {
+    // 前端是纯 hash 路由（#/... 不会发给服务器），所以**不需要 SPA fallback**，
+    // 只要能返回 index.html 即可，express.static 的默认行为就够。
+    app.use(express.static(DIST_DIR))
+    console.log(`[static] 托管前端：${DIST_DIR}`)
+  } else {
+    console.warn(`[static] 没找到 ${DIST_DIR}，只提供 /api。先跑 npm run build。`)
+  }
+}
+
+attachStaticFrontend()
+
 export function startServer(): Promise<void> {
+  // 默认只绑回环。要挂到内网让别的机器访问，必须显式设 PLAYGROUND_LISTEN_HOST=0.0.0.0，
+  // 且必须先配好令牌 —— 见下面 assertSafeExposure。
+  const host = process.env.PLAYGROUND_LISTEN_HOST?.trim() || '127.0.0.1'
+  // 上次被 kill 时漏下的 .<pid>.tmp（索引落盘是 tmp+rename，SIGKILL 时 catch 不执行）。
+  // 趁还没开始写就扫一遍；够老的才删，见 sweepStaleTmp 的说明。
+  try {
+    const swept = sweepStaleTmp(DATA_DIR)
+    if (swept) console.log(`[data] 清掉 ${swept} 个上次残留的 .tmp`)
+  } catch {
+    /* 打扫卫生失败不影响启动 */
+  }
   return new Promise((resolve, reject) => {
-    const server = app.listen(PORT, '127.0.0.1', () => {
+    try {
+      assertSafeExposure(host)
+    } catch (err) {
+      reject(err)
+      return
+    }
+    const server = app.listen(PORT, host, () => {
       const { apiKey, model } = resolveLlmConfig()
       const mode = apiKey ? 'live' : 'mock'
       const wiki = listWikiTree()
-      console.log(`[agent-chat] http://127.0.0.1:${PORT}  mode=${mode}  model=${model}`)
+      const shown = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host
+      console.log(`[agent-chat] http://${shown}:${PORT}  (listen ${host})  mode=${mode}  model=${model}`)
+      console.log(
+        `[auth] ${authRequired() ? '已启用访问令牌' : '没配令牌 —— 只适合本机自用，别对外暴露'}`,
+      )
+      if (sandboxMode() === 'docker') {
+        console.log('[sandbox] docker 模式：交付的测试命令跑在一次性容器里')
+        // 上次被 kill 时漏下的容器（正常路径有 --rm 会自己消失）
+        try {
+          cleanupOrphanContainers()
+        } catch (err) {
+          console.warn('[sandbox] 清理残留容器失败:', err instanceof Error ? err.message : err)
+        }
+      } else {
+        console.log('[sandbox] off 模式：命令直接在宿主机上跑（本地开发）')
+      }
       console.log(`[wiki] ${wiki.exists ? `${wiki.count} 篇 @ ${getWikiRoot()}` : `目录不存在 ${getWikiRoot()}`}`)
       void ensureIndex().catch((err) => {
         console.warn('[rag] 启动索引失败，先走关键词:', err)
@@ -1700,13 +2408,15 @@ export function startServer(): Promise<void> {
       } catch (err) {
         console.warn('[video] 恢复中断任务失败:', err instanceof Error ? err.message : err)
       }
-      void reconnectMcp().then((mcp) => {
-        if (!mcp.enabled) return
-        if (mcp.connected) {
-          console.log(`[mcp] ${mcp.tools.length} tools @ ${mcp.url}`)
-        } else {
-          console.warn('[mcp] 未连上:', mcp.error)
-        }
+      runWithUser('local', () => {
+        void reconnectMcp().then((mcp) => {
+          if (!mcp.enabled) return
+          if (mcp.connected) {
+            console.log(`[mcp] ${mcp.tools.length} tools @ ${mcp.url}`)
+          } else {
+            console.warn('[mcp] 未连上:', mcp.error)
+          }
+        })
       })
       resolve()
     })

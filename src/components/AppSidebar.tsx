@@ -18,7 +18,7 @@ const PRIMARY: NavItem[] = [
 
 const HELP: NavItem[] = [
   { id: 'vectors', href: '#/vectors', label: '向量库', icon: 'vector' },
-  { id: 'settings', href: '#/settings', label: '配置', icon: 'gear' },
+  { id: 'settings', href: '#/settings', label: '设置', icon: 'gear' },
 ]
 
 function Icon({ name }: { name: NavItem['icon'] }) {

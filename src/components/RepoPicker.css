@@ -1,0 +1,123 @@
+.repopick {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.repopick__mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.32);
+}
+
+.repopick__panel {
+  position: relative;
+  width: min(560px, calc(100vw - 2rem));
+  max-height: min(70vh, 640px);
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.22);
+  overflow: hidden;
+}
+
+.repopick__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid #e8eaee;
+}
+
+.repopick__title {
+  font-weight: 650;
+  font-size: 0.95rem;
+  color: #0f172a;
+}
+
+.repopick__x {
+  border: none;
+  background: transparent;
+  font-size: 1.25rem;
+  line-height: 1;
+  color: #64748b;
+  cursor: pointer;
+  padding: 0 0.25rem;
+}
+
+.repopick__x:hover {
+  color: #0f172a;
+}
+
+.repopick__list {
+  list-style: none;
+  margin: 0;
+  padding: 0.4rem;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.repopick__row {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.repopick__row:hover {
+  background: #f1f5f9;
+}
+
+.repopick__row--sub {
+  padding-left: 1.6rem;
+}
+
+.repopick__name {
+  font-size: 0.9rem;
+  color: #0f172a;
+  font-weight: 550;
+}
+
+.repopick__hint {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.repopick__err {
+  margin: 0.7rem 1rem 0;
+  padding: 0.5rem 0.7rem;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 0.82rem;
+}
+
+.repopick__empty {
+  padding: 1.4rem 1rem;
+  color: #94a3b8;
+  font-size: 0.85rem;
+}
+
+.repopick__foot {
+  padding: 0.6rem 1rem;
+  border-top: 1px solid #e8eaee;
+  color: #94a3b8;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
