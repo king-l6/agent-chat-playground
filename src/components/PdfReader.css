@@ -1,0 +1,417 @@
+/* PDF 阅读器。配色跟文档页统一，用的都是各组件里那套 slate / blue 值 */
+
+.pdfr {
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: minmax(230px, 300px) minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 0 0.85rem 0.85rem;
+}
+
+.pdfr__nav {
+  min-height: 0;
+  background: #fff;
+  border-radius: 12px;
+  padding: 0.7rem 0.55rem 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  overflow: hidden;
+}
+
+/* --------------------------------- 上传 --------------------------------- */
+
+.pdfr__upload {
+  display: block;
+  text-align: center;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  padding: 0.5rem;
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: #2563eb;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.pdfr__upload:hover {
+  background: #f8fafc;
+  border-color: #93c5fd;
+}
+
+.pdfr__upload--busy {
+  color: #64748b;
+  cursor: progress;
+}
+
+/* -------------------------------- 文档列表 -------------------------------- */
+
+.pdfr__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 32%;
+  overflow: auto;
+  flex-shrink: 0;
+  border-bottom: 1px solid #f1f5f9;
+  padding-bottom: 0.4rem;
+}
+
+.pdfr__item {
+  display: flex;
+  align-items: stretch;
+  border-radius: 8px;
+}
+
+.pdfr__item:hover {
+  background: #f1f5f9;
+}
+
+.pdfr__item--on {
+  background: #eef2ff;
+}
+
+.pdfr__open {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  padding: 0.35rem 0.45rem;
+  border-radius: 8px;
+  cursor: pointer;
+  display: grid;
+  gap: 0.1rem;
+}
+
+.pdfr__name {
+  font-size: 0.8rem;
+  color: #0f172a;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdfr__item--on .pdfr__name {
+  color: #1d4ed8;
+}
+
+.pdfr__meta {
+  font-size: 0.7rem;
+  color: #94a3b8;
+}
+
+.pdfr__del {
+  border: 0;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 0.45rem;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.pdfr__del:hover {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+
+/* --------------------------------- 目录 ---------------------------------- */
+
+.pdfr__toc-head {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.pdfr__search {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: 0.8rem;
+  background: #f8fafc;
+}
+
+.pdfr__search:focus {
+  outline: none;
+  border-color: #93c5fd;
+  background: #fff;
+}
+
+.pdfr__badge {
+  font-size: 0.68rem;
+  color: #64748b;
+  background: #f1f5f9;
+  border-radius: 999px;
+  padding: 0.2rem 0.5rem;
+  white-space: nowrap;
+}
+
+.pdfr__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.pdfr-toc {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pdfr-toc .pdfr-toc {
+  padding-left: 0.7rem;
+}
+
+.pdfr-toc__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.15rem;
+  border-radius: 8px;
+  padding: 0.1rem 0.2rem;
+}
+
+.pdfr-toc__row:hover {
+  background: #f1f5f9;
+}
+
+.pdfr-toc__row--on {
+  background: #eef2ff;
+}
+
+.pdfr-toc__row--on .pdfr-toc__title {
+  color: #1d4ed8;
+  font-weight: 650;
+}
+
+.pdfr-toc__chev {
+  border: 0;
+  background: transparent;
+  padding: 0.3rem 0.15rem;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.pdfr-chev {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 4px 0 4px 6px;
+  border-color: transparent transparent transparent #94a3b8;
+}
+
+.pdfr-chev--open {
+  transform: rotate(90deg);
+}
+
+.pdfr-toc__dot {
+  width: 0.6rem;
+  flex-shrink: 0;
+}
+
+.pdfr-toc__title {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 0.8rem;
+  color: #334155;
+  text-align: left;
+  padding: 0.28rem 0.15rem;
+  cursor: pointer;
+  line-height: 1.35;
+}
+
+.pdfr-toc__page {
+  font-size: 0.68rem;
+  color: #94a3b8;
+  padding: 0.3rem 0.25rem 0.3rem 0;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* -------------------------------- 正文区 --------------------------------- */
+
+.pdfr__main {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: #fff;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.pdfr__placeholder {
+  padding: 2.2rem;
+  color: #64748b;
+}
+
+.pdfr__placeholder h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+  color: #0f172a;
+}
+
+.pdfr__placeholder p {
+  margin: 0;
+  font-size: 0.86rem;
+  line-height: 1.7;
+  max-width: 46ch;
+}
+
+.pdfr__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.85rem;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.pdfr__title {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.pdfr__title strong {
+  font-size: 0.86rem;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdfr__title span {
+  font-size: 0.74rem;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+.pdfr__zoom {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  flex-shrink: 0;
+}
+
+.pdfr__zoom button {
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  color: #334155;
+  font: inherit;
+  font-size: 0.78rem;
+  border-radius: 7px;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+  min-width: 1.9rem;
+}
+
+.pdfr__zoom button:hover {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+
+.pdfr__zoom-reset {
+  font-variant-numeric: tabular-nums;
+  color: #64748b;
+}
+
+.pdfr__body {
+  min-height: 0;
+  overflow: auto;
+  background: #f1f5f9;
+  scroll-behavior: smooth;
+}
+
+.pdfr__wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 26px 0 40px;
+}
+
+/* ------------------------------- 单页画布 -------------------------------- */
+
+.pdfr-page {
+  position: relative;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+  flex-shrink: 0;
+}
+
+/* 页码用伪元素画：这个盒子的子节点由 pdf.js 接管，React 不能往里塞东西，
+   否则 React 以为该存在的节点被 replaceChildren 删掉了，下次更新就报 removeChild */
+
+.pdfr-page::after {
+  content: attr(data-page);
+  position: absolute;
+  top: -1.15rem;
+  left: 0;
+  font-size: 0.7rem;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+
+.pdfr-page__canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* pdf.js 的文本层：透明文字压在画面上，只为选中和搜索用。
+   尺寸靠 --scale-factor / --total-scale-factor，由 setLayerDimensions 写在元素上 */
+.pdfr-page__text {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+}
+
+.pdfr-page__text span,
+.pdfr-page__text br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+
+.pdfr-page__text ::selection {
+  background: rgba(37, 99, 235, 0.28);
+}
+
+.pdfr-page__text .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: -1;
+  cursor: default;
+  user-select: none;
+}
+
+/* --------------------------------- 空态 ---------------------------------- */
+
+.pdfr__empty {
+  margin: 0.2rem 0 0.6rem;
+  padding: 0 0.4rem;
+  font-size: 0.78rem;
+  color: #94a3b8;
+  line-height: 1.6;
+}

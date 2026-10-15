@@ -59,6 +59,20 @@ import {
   tempUploadFilename,
 } from './knowledge.js'
 import {
+  PDF_DIR,
+  commitPdf,
+  deletePdf,
+  ensurePdfDir,
+  getPdf,
+  isPdfId,
+  listPdfs,
+  pdfFilePath,
+  readPdfToc,
+  savePdfToc,
+  tempPdfFilename,
+  type PdfTocNode,
+} from './pdfs.js'
+import {
   deleteUploadedFile,
   ensureIndex,
   getRagStatus,
@@ -137,7 +151,11 @@ const PORT = Number(process.env.PLAYGROUND_PORT || process.env.PORT || 8790)
  * 再回来调 http://127.0.0.1:8790（见 package.json 的 pack:app），这是跨源，
  * Origin 头是字符串 "null"。以前靠 origin:true 反射着，直接关掉会让桌面壳所有请求被拦。
  * 所以：没配令牌（＝桌面壳 / 本地开发）时放行 "null"；配了令牌（＝服务形态）时只认显式白名单。
+ *
+ * 本地开发也不全是同源：.env 里 VITE_API_BASE=http://127.0.0.1:8790 时，
+ * Vite 页面（5176）会绕过代理直连本进程（为了躲代理吞 SSE），同样是跨源，一并放行。
  */
+const DEV_ORIGINS = ['http://127.0.0.1:5176', 'http://localhost:5176']
 const CORS_ORIGINS = (process.env.PLAYGROUND_CORS_ORIGIN || '')
   .split(',')
   .map((s) => s.trim())
@@ -146,7 +164,7 @@ const corsOrigin: CorsOptions['origin'] = CORS_ORIGINS.length
   ? CORS_ORIGINS
   : authRequired()
     ? false
-    : ['null']
+    : ['null', ...DEV_ORIGINS]
 app.use(
   cors({
     origin: corsOrigin,
@@ -1644,6 +1662,159 @@ app.delete('/api/knowledge/docs/:docId', async (req, res) => {
   try {
     await deleteUploadedFile(decodeURIComponent(String(req.params.docId)))
     res.json({ ok: true, rag: getRagStatus(), documents: listDocuments() })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(404).json({ error: message })
+  }
+})
+
+/**
+ * PDF 阅读器：只存不检索，所以**不碰 index.json**，跟 wiki 批量入库互不干扰。
+ *
+ * 目录不在服务端算：pdf.js 已经在浏览器里解析这份文件了，书签（getOutline）和
+ * 文本层（getTextContent 带字号）都是现成的，再让 Node 端装一套解析器纯属重复劳动。
+ * 前端算完 PUT 回来缓存，下次打开直接读。
+ */
+const pdfUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      ensurePdfDir()
+      cb(null, PDF_DIR)
+    },
+    filename: (_req, _file, cb) => cb(null, tempPdfFilename()),
+  }),
+  // 面试指南这类书动辄上百 MB，但也不能不设上限
+  limits: { fileSize: 200 * 1024 * 1024 },
+})
+
+/** 目录是前端传上来的外部输入：层级、长度、节点数都得自己夹一遍再落盘 */
+const MAX_TOC_NODES = 5000
+function normalizeToc(raw: unknown): PdfTocNode[] {
+  let budget = MAX_TOC_NODES
+  const walk = (list: unknown, level: number): PdfTocNode[] => {
+    if (!Array.isArray(list) || level > 6) return []
+    const out: PdfTocNode[] = []
+    for (const item of list) {
+      if (budget <= 0) break
+      if (!item || typeof item !== 'object') continue
+      const node = item as Record<string, unknown>
+      const title = String(node.title ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 200)
+      const page = Math.trunc(Number(node.page))
+      if (!title || !Number.isFinite(page) || page < 1) continue
+      budget -= 1
+      const y = Number(node.y)
+      const kids = walk(node.children, level + 1)
+      const rec: PdfTocNode = { title, page, y: Number.isFinite(y) ? y : 0, level }
+      if (kids.length > 0) rec.children = kids
+      out.push(rec)
+    }
+    return out
+  }
+  return walk(raw, 1)
+}
+
+app.get('/api/pdfs', (_req, res) => {
+  res.json({ pdfs: listPdfs() })
+})
+
+/** POST /api/pdfs 表单字段名 file，只收 .pdf */
+app.post('/api/pdfs', pdfUpload.single('file'), (req, res) => {
+  const file = req.file
+  if (!file) {
+    res.status(400).json({ error: '请选择文件' })
+    return
+  }
+  const name = decodeMulterName(file.originalname)
+  const discard = () => {
+    try {
+      fs.unlinkSync(file.path)
+    } catch {
+      /* 清理失败不该盖掉真正的错因 */
+    }
+  }
+  if (!/\.pdf$/i.test(name)) {
+    discard()
+    res.status(400).json({ error: '仅支持 .pdf' })
+    return
+  }
+  // multer 只看请求头里的文件名，改个后缀什么都能塞进来；再认一下文件头
+  let head = ''
+  try {
+    const fd = fs.openSync(file.path, 'r')
+    try {
+      const buf = Buffer.alloc(5)
+      fs.readSync(fd, buf, 0, 5, 0)
+      head = buf.toString('latin1')
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    /* 读不到就按不合规处理 */
+  }
+  if (!head.startsWith('%PDF-')) {
+    discard()
+    res.status(400).json({ error: '这不是有效的 PDF 文件' })
+    return
+  }
+  try {
+    res.json({ ok: true, pdf: commitPdf(file.path, name, file.size) })
+  } catch (err) {
+    discard()
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
+  }
+})
+
+/** 前端用 axios 取 arraybuffer 再喂给 pdf.js，所以这里只当静态文件吐 */
+app.get('/api/pdfs/:id/file', (req, res) => {
+  const id = String(req.params.id)
+  const rec = getPdf(id)
+  const file = pdfFilePath(id)
+  if (!rec || !file) {
+    res.status(404).json({ error: 'PDF 不存在' })
+    return
+  }
+  // 中文名直接写 filename= 会变乱码，用 RFC 5987 的 filename*
+  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(rec.name)}`)
+  res.sendFile(file, (err) => {
+    // 读到一半关页面会让 sendFile 报 aborted，那不是服务端错误
+    if (err && !res.headersSent) res.status(500).json({ error: '读取失败' })
+  })
+})
+
+app.get('/api/pdfs/:id/toc', (req, res) => {
+  const id = String(req.params.id)
+  if (!getPdf(id)) {
+    res.status(404).json({ error: 'PDF 不存在' })
+    return
+  }
+  res.json({ toc: readPdfToc(id) })
+})
+
+app.put('/api/pdfs/:id/toc', (req, res) => {
+  const id = String(req.params.id)
+  if (!isPdfId(id) || !getPdf(id)) {
+    res.status(404).json({ error: 'PDF 不存在' })
+    return
+  }
+  const source = req.body?.source === 'outline' ? 'outline' : 'infer'
+  const pages = Math.trunc(Number(req.body?.pages ?? 0)) || 0
+  const nodes = normalizeToc(req.body?.nodes)
+  try {
+    res.json({ ok: true, pdf: savePdfToc(id, source, nodes, pages) })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
+  }
+})
+
+app.delete('/api/pdfs/:id', (req, res) => {
+  try {
+    deletePdf(String(req.params.id))
+    res.json({ ok: true, pdfs: listPdfs() })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     res.status(404).json({ error: message })

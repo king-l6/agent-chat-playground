@@ -18,6 +18,7 @@ import {
   type WikiNode,
 } from '../api/chat'
 import { normalizeWeworkMarkdown } from '../lib/weworkMarkdown'
+import { PdfReader } from './PdfReader'
 import './KnowledgePage.css'
 import './DocumentsPage.css'
 
@@ -26,17 +27,20 @@ function hashQuery(): URLSearchParams {
   return new URLSearchParams(q)
 }
 
-function currentTab(): 'wiki' | 'ingest' {
-  return hashQuery().get('tab') === 'ingest' ? 'ingest' : 'wiki'
+function currentTab(): 'wiki' | 'ingest' | 'pdf' {
+  const tab = hashQuery().get('tab')
+  if (tab === 'ingest' || tab === 'pdf') return tab
+  return 'wiki'
 }
 
 function currentWikiPath(): string {
   return hashQuery().get('path') || ''
 }
 
-function setDocHash(next: { tab?: 'wiki' | 'ingest'; path?: string }) {
+function setDocHash(next: { tab?: 'wiki' | 'ingest' | 'pdf'; path?: string }) {
   const params = new URLSearchParams()
   if (next.tab === 'ingest') params.set('tab', 'ingest')
+  if (next.tab === 'pdf') params.set('tab', 'pdf')
   if (next.path) params.set('path', next.path)
   const qs = params.toString()
   location.hash = qs ? `#/documents?${qs}` : '#/documents'
@@ -512,8 +516,15 @@ export function DocumentsPage() {
         >
           RAG 入库
         </button>
+        <button
+          type="button"
+          className={tab === 'pdf' ? 'docs__tab docs__tab--on' : 'docs__tab'}
+          onClick={() => setDocHash({ tab: 'pdf' })}
+        >
+          PDF 阅读
+        </button>
       </div>
-      {tab === 'ingest' ? <IngestPanel /> : <WikiBrowser />}
+      {tab === 'ingest' ? <IngestPanel /> : tab === 'pdf' ? <PdfReader /> : <WikiBrowser />}
     </div>
   )
 }
