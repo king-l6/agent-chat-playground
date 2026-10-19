@@ -159,6 +159,7 @@
 .app__body > .desk,
 .app__body > .reel,
 .app__body > .kb,
+.app__body > .meet,
 .app__body > .settings {
   min-height: 0;
 }

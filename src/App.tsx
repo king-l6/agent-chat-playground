@@ -18,6 +18,7 @@ import { WorkspaceBar } from './components/WorkspaceBar';
 import { SettingsPage } from './components/SettingsPage';
 import { DeliveryPage } from './components/DeliveryPage';
 import { VideoPage } from './components/VideoPage';
+import { MeetingPage } from './components/MeetingPage';
 import { AppSidebar } from './components/AppSidebar';
 import { SessionList } from './components/SessionList';
 import {
@@ -73,7 +74,7 @@ function appendPart(parts: MessagePart[] | undefined, incoming: MessagePart): Me
   return next
 }
 
-function pageFromHash(): 'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery' | 'video' {
+function pageFromHash(): 'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery' | 'video' | 'rooms' {
   const path = location.hash.replace(/^#\/?/, '').split('?')[0]
   if (path.startsWith('canvas') || path.startsWith('workflow')) return 'canvas'
   if (path.startsWith('memory')) return 'memory'
@@ -82,6 +83,7 @@ function pageFromHash(): 'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' 
   if (path.startsWith('settings') || path.startsWith('config')) return 'settings'
   if (path.startsWith('delivery')) return 'delivery'
   if (path.startsWith('video')) return 'video'
+  if (path.startsWith('rooms')) return 'rooms'
   return 'chat'
 }
 
@@ -117,7 +119,7 @@ export default function App() {
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [mcp, setMcp] = useState<McpPublic | null>(null);
   const [page, setPage] = useState<
-    'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery' | 'video'
+    'chat' | 'documents' | 'memory' | 'vectors' | 'canvas' | 'settings' | 'delivery' | 'video' | 'rooms'
   >(pageFromHash);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('agentos.rail') === '1');
   /** 顶部/底部错误条 */
@@ -1188,6 +1190,7 @@ export default function App() {
         {page === 'canvas' && <CanvasPage />}
         {page === 'delivery' && <DeliveryPage />}
         {page === 'video' && <VideoPage />}
+        {page === 'rooms' && <MeetingPage />}
         {page === 'settings' && (
           <SettingsPage
             onSaved={(next) => {

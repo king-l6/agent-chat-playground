@@ -126,6 +126,7 @@ import {
 } from './auth.js'
 import { cleanupOrphanContainers, sandboxStatus } from './sandbox/docker.js'
 import { sandboxMode } from './sandbox/config.js'
+import { bookMeeting, scanMeetingRooms } from './meeting.js'
 
 dotenv.config({ path: path.join(REPO_ROOT, '.env'), override: true })
 if (process.env.PLAYGROUND_DATA) {
@@ -2314,6 +2315,42 @@ app.post('/api/memory/sweep', (_req, res) => {
 app.get('/api/memory/log', (req, res) => {
   const limit = Number(req.query.limit ?? 100)
   res.json({ items: readMemoryLog(Number.isFinite(limit) ? limit : 100) })
+})
+
+/* ===================== 会议室预定 ===================== */
+
+app.post('/api/meeting/scan', async (req, res) => {
+  const body = req.body as { cookie?: unknown; date?: unknown }
+  try {
+    const result = await scanMeetingRooms(String(body?.cookie ?? ''), String(body?.date ?? ''))
+    res.json(result)
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : '查询会议室失败' })
+  }
+})
+
+app.post('/api/meeting/book', async (req, res) => {
+  const body = req.body as {
+    cookie?: unknown
+    roomId?: unknown
+    start?: unknown
+    end?: unknown
+    subject?: unknown
+    reminderTime?: unknown
+  }
+  try {
+    const result = await bookMeeting({
+      cookie: String(body?.cookie ?? ''),
+      roomId: Number(body?.roomId),
+      start: String(body?.start ?? ''),
+      end: String(body?.end ?? ''),
+      subject: String(body?.subject ?? ''),
+      reminderTime: body?.reminderTime == null || body.reminderTime === '' ? 2 : Number(body.reminderTime),
+    })
+    res.json(result)
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : '预定失败' })
+  }
 })
 
 /* ===================== 前端静态托管 ===================== */
